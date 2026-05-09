@@ -26,6 +26,7 @@ from scipy.spatial.transform import Rotation
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from depth_receiver import DepthReceiver
+from get_position_with_task import OdomTFBroadcaster
 
 # ── Tunable parameters ──────────────────────────────────────────────────────
 MAVSDK_ADDRESS   = "udp://:14540"
@@ -37,166 +38,6 @@ SPEED_Z   = 1.0     # m/s  vertical velocity
 YAW_RATE  = 30.0    # deg/s
 
 KEY_HOLD_TIMEOUT = 0.12   # seconds – key considered released after this
-
-
-# =============================================================================
-#  SLAM MAPPER
-# =============================================================================
-
-class SlamMapper:
-    """
-    Runs in its own daemon thread.
-    Reads pose from _PoseState (populated by a background telemetry coroutine)
-    and depth frames from DepthReceiver, fusing them into an Open3D point cloud.
-
-    Coordinate convention
-    ----------------------
-    PX4 NED position + attitude_euler (roll/pitch/yaw in degrees, ZYX extrinsic).
-    Internally converted to a right-handed Z-up world frame:
-        world_x = east_m
-        world_y = north_m
-        world_z = -down_m
-    """
-
-    # ── Camera intrinsics ──────────────────────────────────────────────────
-    FX, FY   = 433.0, 433.0
-    CX, CY   = 320.0, 240.0
-
-    # ── Depth clip (metres) ────────────────────────────────────────────────
-    DEPTH_MIN = 0.15
-    DEPTH_MAX = 8.0
-
-    # ── Map resolution ─────────────────────────────────────────────────────
-    VOXEL_SIZE = 0.08   # metres – voxel down-sample of global map
-
-    # ── Thread period ──────────────────────────────────────────────────────
-    PERIOD = 0.10       # seconds (10 Hz)
-
-    # ── Extrinsic: camera frame → drone body frame ─────────────────────────
-    # Camera faces forward (+X body). Adjust translation for your mount.
-    T_BODY_CAM = np.array([
-        [ 0,  0,  1,  0.10],   # cam-x = body-forward
-        [-1,  0,  0,  0.00],   # cam-y = body-left
-        [ 0, -1,  0,  0.05],   # cam-z = body-up
-        [ 0,  0,  0,  1.00]
-    ], dtype=float)
-
-    def __init__(self, pose_state: "_PoseState", receiver: DepthReceiver):
-        self.pose_state = pose_state
-        self.receiver   = receiver
-
-        self.global_map = o3d.geometry.PointCloud()
-        self._map_lock  = threading.Lock()
-
-        self._running       = False
-        self._last_frame_id = None
-        self._thread = threading.Thread(
-            target=self._loop, daemon=True, name="SlamMapper"
-        )
-
-    # ── Public API ─────────────────────────────────────────────────────────
-
-    def start(self):
-        self._running = True
-        self._thread.start()
-        print("[SlamMapper] Thread started.")
-
-    def stop(self):
-        self._running = False
-        self._thread.join(timeout=3.0)
-        print("[SlamMapper] Thread stopped.")
-
-    def point_count(self) -> int:
-        with self._map_lock:
-            return len(self.global_map.points)
-
-    def save_map(self, path: str = "slam_map.pcd"):
-        with self._map_lock:
-            snapshot = o3d.geometry.PointCloud(self.global_map)
-        o3d.io.write_point_cloud(path, snapshot)
-        print(f"[SlamMapper] Map saved → {path}  ({len(snapshot.points)} pts)")
-
-    # ── Internal helpers ───────────────────────────────────────────────────
-
-    def _pose_ready(self) -> bool:
-        ps = self.pose_state
-        return (ps.north_m    is not None and
-                ps.roll_deg   is not None)
-
-    def _build_world_transform(self) -> np.ndarray:
-        ps = self.pose_state
-
-        # NED → Z-up world
-        north =  ps.north_m
-        east  =  ps.east_m
-        up    = -ps.down_m
-
-        # PX4 attitude_euler: ZYX extrinsic, yaw CW-positive → negate for scipy
-        R = Rotation.from_euler(
-            'ZYX',
-            [-ps.yaw_deg, ps.pitch_deg, ps.roll_deg],
-            degrees=True
-        ).as_matrix()
-
-        T_world_body = np.eye(4)
-        T_world_body[:3, :3] = R
-        T_world_body[:3,  3] = [east, north, up]
-
-        return T_world_body @ self.T_BODY_CAM   # T_world_cam
-
-    def _depth_to_points_cam(self, depth: np.ndarray) -> np.ndarray:
-        h, w   = depth.shape
-        u, v   = np.meshgrid(np.arange(w), np.arange(h))
-        z      = depth.astype(np.float64)
-        valid  = (z > self.DEPTH_MIN) & (z < self.DEPTH_MAX) & np.isfinite(z)
-
-        z, u, v = z[valid], u[valid].astype(float), v[valid].astype(float)
-        x = (u - self.CX) * z / self.FX
-        y = (v - self.CY) * z / self.FY
-        return np.column_stack([x, y, z])       # Nx3 in camera frame
-
-    @staticmethod
-    def _apply_transform(pts: np.ndarray, T: np.ndarray) -> np.ndarray:
-        ones  = np.ones((len(pts), 1))
-        return (T @ np.hstack([pts, ones]).T).T[:, :3]
-
-    # ── Thread loop ────────────────────────────────────────────────────────
-
-    def _loop(self):
-        while self._running:
-            t0 = time.monotonic()
-
-            if not self._pose_ready():
-                time.sleep(0.05)
-                continue
-
-            depth = self.receiver.get_frame()
-            if depth is None:
-                time.sleep(self.PERIOD)
-                continue
-
-            fid = id(depth)
-            if fid == self._last_frame_id:
-                time.sleep(self.PERIOD)
-                continue
-            self._last_frame_id = fid
-
-            pts_cam = self._depth_to_points_cam(depth)
-            if len(pts_cam) == 0:
-                time.sleep(self.PERIOD)
-                continue
-
-            T_wc       = self._build_world_transform()
-            pts_world  = self._apply_transform(pts_cam, T_wc)
-
-            frame_pcd        = o3d.geometry.PointCloud()
-            frame_pcd.points = o3d.utility.Vector3dVector(pts_world)
-
-            with self._map_lock:
-                self.global_map += frame_pcd
-                self.global_map  = self.global_map.voxel_down_sample(self.VOXEL_SIZE)
-
-            time.sleep(max(0.0, self.PERIOD - (time.monotonic() - t0)))
 
 
 # =============================================================================
@@ -234,7 +75,7 @@ async def _pose_monitor(drone: System, ps: _PoseState, stop: asyncio.Event):
             ps.roll_deg  = att.roll_deg
             ps.pitch_deg = att.pitch_deg
             ps.yaw_deg   = att.yaw_deg
-
+            print(f'pitch:{ps.pitch_deg} | yaw:{ps.yaw_deg} | roll:{ps.roll_deg}')
     try:
         await asyncio.gather(_pos(), _att())
     except asyncio.CancelledError:
@@ -507,7 +348,7 @@ async def shutdown(drone: System, slam: SlamMapper, stop_event: asyncio.Event):
 async def main():
     drone      = System()
     await connect(drone)
-
+    rclpy.init()
     # ── Pose state shared between telemetry task and SlamMapper ───────────
     pose_state = _PoseState()
     stop_event = asyncio.Event()
@@ -518,13 +359,16 @@ async def main():
 
     # ── Depth receiver + mapper ───────────────────────────────────────────
     receiver = DepthReceiver(DEPTH_TOPIC)
-    slam     = SlamMapper(pose_state, receiver)
+    
     # slam.start() is called inside control_loop after takeoff
-
+    tf2_node = OdomTFBroadcaster(Drone=drone,stop_event=stop_event)
     # ── Keyboard thread ───────────────────────────────────────────────────
     kb = threading.Thread(target=keyboard_thread, daemon=True)
+    
     kb.start()
-
+    ros_thread = threading.Thread(target=rclpy.spin, args=(tf2_node,), daemon=True)
+    ros_thread.start()
+    
     print("[INFO] Press T to arm & take off, then fly. M=map info, P=save, Q=quit.\n")
 
     try:
@@ -532,6 +376,8 @@ async def main():
     except asyncio.CancelledError:
         pass
     finally:
+        tf2_node.destroy_node()
+        rclpy.shutdown()
         await shutdown(drone, slam, stop_event)
 
 
