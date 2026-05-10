@@ -22,7 +22,7 @@ class SharedState:
 
 
 class OdomTFBroadcaster(Node):
-    def __init__(self,Drone,stop_event):
+    def __init__(self,Drone : Drone,stop_event : asyncio.Event):
         super().__init__('px4_tf_broadcaster')
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.stop_event = stop_event
