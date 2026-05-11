@@ -1,15 +1,57 @@
-#!/usr/bin/env python3
 """
-PX4 Keyboard Controller + SlamMapper
-=====================================
-Fly manually with keyboard while SlamMapper builds a point-cloud map
-in a background thread from the Gazebo depth camera.
+PX4 Keyboard Controller using MAVSDK – VelocityBodyYawspeed
+============================================================
+Commands velocity in the drone body frame so movement keys work
+regardless of which direction the drone is facing.
 
-Extra keys added:
-  M     Print current map point count
-  P     Save map to slam_map.pcd  (also saved automatically on quit)
+Body frame:
+  +forward_m_s  = nose direction
+  +right_m_s    = right of nose
+  +down_m_s     = downward  (NED convention – negative = climb)
 
-Everything else is identical to the original keyboard controller.
+Controls:
+  W / S     Throttle up / down   (climb / descend)
+  A / D     Yaw CCW / CW
+  U / J     Pitch forward / backward
+  H / K     Roll left / right
+  SPACE     Full stop hover
+  T         Arm + Takeoff
+  L         Land
+  M         Toggle mapping on / off
+  Q         Quit
+
+Threading / async model
+-----------------------
+┌─────────────────────────────────────────┐
+│            Main Thread                  │
+│   asyncio.run(main())                   │
+│                                         │
+│  ┌─────────────────────────────────┐    │
+│  │        asyncio event loop       │    │
+│  │  • Drone.connect()              │    │
+│  │  • Drone.arm_and_takeoff()      │    │
+│  │  • control_loop()  (20 Hz cmd)  │    │
+│  │  • broadcaster                  │    │
+│  │    .odom_monitor_task()         │    │
+│  │    streams NED pos + attitude   │    │
+│  │    → calls publish_tf()         │    │
+│  │  • mapping_loop() (async task)  │    │
+│  │  • visualization_loop() (task)  │    │
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│         keyboard_thread (daemon)        │
+│   reads raw terminal input              │
+└─────────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│         ros_spin_thread (daemon)        │
+│   rclpy.spin(broadcaster)               │
+│   keeps ROS2 executor alive             │
+└─────────────────────────────────────────┘
+
+Install:
+  pip install mavsdk
+  sudo apt install ros-<distro>-tf2-ros python3-tf-transformations
 """
 
 import asyncio
@@ -20,86 +62,50 @@ import tty
 import threading
 import time
 import select
+import copy
+
+import cv2
 import numpy as np
-import open3d as o3d
-from scipy.spatial.transform import Rotation
-from mavsdk import System
+import rclpy
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
+
+# ── Imports from sibling modules (no changes to those files) ──────────────────
+from drone_control import Drone                          # owns mavsdk.System()
+from get_position_with_task import OdomTFBroadcaster    # ROS2 TF broadcaster node
+from get_position_with_task_v2 import Telemetry, position_monitor_task
+from GlobalMapperV2 import GlobalMapper
 from depth_receiver import DepthReceiver
-from get_position_with_task import OdomTFBroadcaster
 
-# ── Tunable parameters ──────────────────────────────────────────────────────
-MAVSDK_ADDRESS   = "udp://:14540"
-TAKEOFF_ALTITUDE = 2.5          # metres
-DEPTH_TOPIC      = "/depth_camera"
+# Reuse SharedState and visualization_loop exactly as defined in mapperV2
+from mapperV2 import SharedState, visualization_loop
 
-SPEED_XY  = 1.0     # m/s  horizontal body velocity
-SPEED_Z   = 1.0     # m/s  vertical velocity
-YAW_RATE  = 30.0    # deg/s
-
+# ── Tunable parameters ────────────────────────────────────────────────────────
+TAKEOFF_ALTITUDE = 2.5    # metres  (Drone.arm_and_takeoff waits 20 s – see note)
+SPEED_XY         = 1.0    # m/s  horizontal body velocity
+SPEED_Z          = 1.0    # m/s  vertical velocity
+YAW_RATE         = 30.0   # deg/s
 KEY_HOLD_TIMEOUT = 0.12   # seconds – key considered released after this
+MAPPING_HZ       = 2.0    # how often to capture a depth frame for the map
 
+# ── Camera intrinsics (must match what GlobalMapper / depth sensor expect) ────
+K = np.array([[433.0, 0.0, 320.0],
+              [0.0,   433.0, 240.0],
+              [0.0,   0.0,   1.0]])
 
-# =============================================================================
-#  POSE STATE  – populated by a background asyncio task, read by SlamMapper
-# =============================================================================
-
-class _PoseState:
-    """Lightweight container updated by two concurrent telemetry streams."""
-    def __init__(self):
-        # position (metres, NED)
-        self.north_m: float | None = None
-        self.east_m:  float | None = None
-        self.down_m:  float | None = None
-        # attitude (degrees)
-        self.roll_deg:  float | None = None
-        self.pitch_deg: float | None = None
-        self.yaw_deg:   float | None = None
-
-
-async def _pose_monitor(drone: System, ps: _PoseState, stop: asyncio.Event):
-    """Stream position_velocity_ned + attitude_euler into _PoseState."""
-
-    async def _pos():
-        async for pv in drone.telemetry.position_velocity_ned():
-            if stop.is_set():
-                break
-            ps.north_m = pv.position.north_m
-            ps.east_m  = pv.position.east_m
-            ps.down_m  = pv.position.down_m
-
-    async def _att():
-        async for att in drone.telemetry.attitude_euler():
-            if stop.is_set():
-                break
-            ps.roll_deg  = att.roll_deg
-            ps.pitch_deg = att.pitch_deg
-            ps.yaw_deg   = att.yaw_deg
-            print(f'pitch:{ps.pitch_deg} | yaw:{ps.yaw_deg} | roll:{ps.roll_deg}')
-    try:
-        await asyncio.gather(_pos(), _att())
-    except asyncio.CancelledError:
-        pass
-
-
-# =============================================================================
-#  KEYBOARD CONTROLLER  (original logic, SlamMapper injected)
-# =============================================================================
-
+# ── Shared flight state ───────────────────────────────────────────────────────
 class State:
     forward_m_s     : float = 0.0
     right_m_s       : float = 0.0
     down_m_s        : float = 0.0
-    yaw_deg_s       : float = 0.0
     running         : bool  = True
     takeoff         : bool  = False
     land            : bool  = False
     offboard_active : bool  = False
-    print_map_count : bool  = False
-    save_map        : bool  = False
+    mapping_active  : bool  = False   # NEW – toggled by 'M' key
 
 state = State()
 
+# ── Active-key tracking (keyboard thread → asyncio control loop) ──────────────
 _key_lock      = threading.Lock()
 _active_key    = ''
 _active_key_ts = 0.0
@@ -116,18 +122,19 @@ def _get_active_key() -> str:
             return _active_key
         return ''
 
+# Maps key → (forward_m_s, right_m_s, down_m_s, yawspeed_deg_s)
 VEL_MAP = {
-    'u': ( SPEED_XY,  0.0,      0.0,      0.0     ),
-    'j': (-SPEED_XY,  0.0,      0.0,      0.0     ),
-    'h': ( 0.0,      -SPEED_XY, 0.0,      0.0     ),
-    'k': ( 0.0,       SPEED_XY, 0.0,      0.0     ),
-    'w': ( 0.0,       0.0,     -SPEED_Z,  0.0     ),
-    's': ( 0.0,       0.0,      SPEED_Z,  0.0     ),
-    'a': ( 0.0,       0.0,      0.0,     -YAW_RATE),
-    'd': ( 0.0,       0.0,      0.0,      YAW_RATE),
+    'u': ( SPEED_XY,  0.0,       0.0,       0.0      ),  # pitch forward
+    'j': (-SPEED_XY,  0.0,       0.0,       0.0      ),  # pitch backward
+    'h': ( 0.0,      -SPEED_XY,  0.0,       0.0      ),  # roll left
+    'k': ( 0.0,       SPEED_XY,  0.0,       0.0      ),  # roll right
+    'w': ( 0.0,       0.0,      -SPEED_Z,   0.0      ),  # throttle up (climb)
+    's': ( 0.0,       0.0,       SPEED_Z,   0.0      ),  # throttle down (descend)
+    'a': ( 0.0,       0.0,       0.0,      -YAW_RATE ),  # yaw CCW
+    'd': ( 0.0,       0.0,       0.0,       YAW_RATE ),  # yaw CW
 }
 
-
+# ── Terminal helpers ──────────────────────────────────────────────────────────
 class RawTerminal:
     def __enter__(self):
         self.fd  = sys.stdin.fileno()
@@ -150,7 +157,7 @@ def out(msg: str):
 
 def print_banner():
     out("\n" + "=" * 54 + "\n")
-    out("  PX4 KEYBOARD CONTROLLER + SLAM MAPPER\n")
+    out("  PX4 KEYBOARD CONTROLLER – VelocityBodyYawspeed\n")
     out("=" * 54 + "\n")
     out("  W / S       Climb / Descend\n")
     out("  A / D       Yaw CCW / CW\n")
@@ -159,12 +166,11 @@ def print_banner():
     out("  SPACE       Full stop\n")
     out("  T           Arm + Takeoff\n")
     out("  L           Land\n")
-    out("  M           Print map point count\n")
-    out("  P           Save map to slam_map.pcd\n")
-    out("  Q           Quit  (map auto-saved)\n")
+    out("  M           Toggle mapping ON / OFF\n")
+    out("  Q           Quit\n")
     out("=" * 54 + "\n\n")
 
-
+# ── Keyboard thread ───────────────────────────────────────────────────────────
 def keyboard_thread():
     print_banner()
     with RawTerminal() as term:
@@ -179,13 +185,14 @@ def keyboard_thread():
                 state.forward_m_s += fwd
                 state.right_m_s   += rgt
                 state.down_m_s    += dwn
-                out(f"\r[KEY] {key.upper()}  fwd={state.forward_m_s:+.1f} "
-                    f"rgt={state.right_m_s:+.1f} dwn={state.down_m_s:+.1f} "
-                    f"yaw={yaw:+.1f}   ")
+                out(f"\r[KEY] {key.upper()}  fwd={state.forward_m_s:+.1f} rgt={state.right_m_s:+.1f} "
+                    f"dwn={state.down_m_s:+.1f} yaw={yaw:+.1f}   ")
 
             elif key == ' ':
+                state.forward_m_s = 0.0
+                state.right_m_s   = 0.0
+                state.down_m_s    = 0.0
                 _update_active_key('')
-                state.forward_m_s = state.right_m_s = state.down_m_s = 0.0
                 out("\n[KEY] SPACE -> Full stop\n")
 
             elif key == 't':
@@ -197,109 +204,108 @@ def keyboard_thread():
                 out("\n[KEY] L -> Land requested\n")
 
             elif key == 'm':
-                state.print_map_count = True
-                out("\n[KEY] M -> Map point count requested\n")
-
-            elif key == 'p':
-                state.save_map = True
-                out("\n[KEY] P -> Save map requested\n")
+                # Toggle mapping on/off at runtime
+                state.mapping_active = not state.mapping_active
+                status = "ON" if state.mapping_active else "OFF"
+                out(f"\n[KEY] M -> Mapping {status}\n")
 
             elif key == 'q':
                 state.running = False
                 out("\n[KEY] Q -> Quit\n")
                 break
 
+# ── ROS2 spin thread ──────────────────────────────────────────────────────────
+def ros_spin_thread(broadcaster: OdomTFBroadcaster):
+    """Keeps the ROS2 executor alive. Runs until rclpy.shutdown() is called."""
+    try:
+        rclpy.spin(broadcaster)
+    except Exception:
+        pass  # normal on shutdown
 
-# ── MAVSDK helpers (unchanged) ────────────────────────────────────────────────
-
-async def connect(drone: System):
-    print(f"[MAVSDK] Connecting to {MAVSDK_ADDRESS} ...")
-    await drone.connect(system_address=MAVSDK_ADDRESS)
-    async for health in drone.telemetry.health():
-        print(f"[HEALTH] GPS={health.is_global_position_ok}  "
-              f"Home={health.is_home_position_ok}  "
-              f"Arm={health.is_armable}")
-        if health.is_global_position_ok and health.is_home_position_ok:
-            break
-    print("[MAVSDK] Connected and healthy.")
-
-
-async def arm_and_takeoff(drone: System):
-    print("[MAVSDK] Arming ...")
-    await drone.action.arm()
-    print(f"[MAVSDK] Taking off to {TAKEOFF_ALTITUDE} m ...")
-    await drone.action.takeoff()
-    async for pos in drone.telemetry.position():
-        alt = pos.relative_altitude_m
-        sys.stdout.write(f"\r[MAVSDK] Alt: {alt:.2f} / {TAKEOFF_ALTITUDE:.2f} m   ")
-        sys.stdout.flush()
-        if alt >= TAKEOFF_ALTITUDE - 0.20:
-            break
-    print(f"\n[MAVSDK] Reached {alt:.2f} m – takeoff complete.")
-
-
-async def start_offboard(drone: System):
-    await drone.offboard.set_velocity_body(
+# ── Offboard bootstrap ────────────────────────────────────────────────────────
+async def start_offboard(drone: Drone):
+    """Send a zero setpoint then enable offboard mode."""
+    await drone.drone.offboard.set_velocity_body(
         VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0)
     )
     try:
-        await drone.offboard.start()
+        await drone.drone.offboard.start()
         state.offboard_active = True
         print("[MAVSDK] Offboard mode ACTIVE.")
     except OffboardError as e:
         print(f"[ERROR] Offboard start failed: {e._result.result}")
         raise
 
+# ── Mapping loop (NEW) ────────────────────────────────────────────────────────
+async def mapping_loop(mapper: GlobalMapper,
+                       receiver: DepthReceiver,
+                       telemetry: Telemetry,
+                       bridge: SharedState):
+    """
+    Runs as an asyncio task alongside control_loop.
+    Captures depth frames and feeds them into GlobalMapper whenever
+    state.mapping_active is True and telemetry is available.
+    Uses the same update_frame() call pattern as mapperV2.DroneNavigation.run().
+    """
+    print("[MAP] Mapping loop started. Press M to enable.")
+    interval = 1.0 / MAPPING_HZ
+
+    while state.running:
+        if not state.mapping_active:
+            await asyncio.sleep(interval)
+            continue
+
+        # Guard: telemetry must be populated before we can map
+        if telemetry.north is None or telemetry.yaw_rad is None:
+            await asyncio.sleep(interval)
+            continue
+
+        depth_frame = receiver.get_frame()
+        if depth_frame is not None:
+            t = copy.copy(telemetry)          # snapshot – same pattern as mapperV2
+            updated = mapper.update_frame(depth_frame, t)
+            if updated is not None:
+                print(f"[MAP] Frame captured at "
+                      f"N:{t.north:.2f} E:{t.east:.2f} Yaw:{t.yaw_deg:.2f}°")
+                bridge.push(updated)          # hand off to visualization_loop
+
+        await asyncio.sleep(interval)
+
+    print("[MAP] Mapping loop exiting.")
 
 # ── Main control loop ─────────────────────────────────────────────────────────
-
-async def control_loop(drone: System, slam: SlamMapper):
+async def control_loop(drone: Drone):
+    """20 Hz velocity-body setpoint loop."""
     print("[MAVSDK] Control loop running at 20 Hz ...")
     dt       = 0.05
     prev_key = ''
 
     while state.running:
-
-        # ── Takeoff ────────────────────────────────────────────────────────
+        # ── T pressed: arm, takeoff via Drone class, then enable offboard ──
         if state.takeoff:
             state.takeoff = False
-            await arm_and_takeoff(drone)
+            await drone.arm_and_takeoff()   # waits ~20 s inside Drone class
             await start_offboard(drone)
-            slam.start()   # begin mapping once the drone is airborne
 
-        # ── Land ───────────────────────────────────────────────────────────
+        # ── L pressed: stop offboard, land, disarm via Drone class ─────────
         if state.land:
             state.land            = False
             state.offboard_active = False
+            state.mapping_active  = False   # also pause mapping on land
+            state.forward_m_s     = 0.0
+            state.right_m_s       = 0.0
+            state.down_m_s        = 0.0
             _update_active_key('')
             print("[MAVSDK] Landing ...")
-            try:
-                await drone.offboard.stop()
-            except Exception:
-                pass
-            await drone.action.land()
-            await asyncio.sleep(8)
+            await drone.land()              # stops offboard + lands + disarms
             print("[MAVSDK] Landed.")
-
-        # ── Map diagnostics ────────────────────────────────────────────────
-        if state.print_map_count:
-            state.print_map_count = False
-            print(f"\n[SLAM] Current map: {slam.point_count()} points")
-
-        if state.save_map:
-            state.save_map = False
-            # run blocking file I/O in a thread so asyncio isn't blocked
-            await asyncio.get_event_loop().run_in_executor(
-                None, slam.save_map, "slam_map.pcd"
-            )
 
         if not state.offboard_active:
             await asyncio.sleep(dt)
             continue
 
-        # ── Velocity command ───────────────────────────────────────────────
         active = _get_active_key()
-        fwd, rgt, dwn, yaw = VEL_MAP.get(active, (0.0, 0.0, 0.0, 0.0))
+        _, _, _, yaw = VEL_MAP.get(active, (0.0, 0.0, 0.0, 0.0))
 
         if active != prev_key:
             if active:
@@ -310,7 +316,7 @@ async def control_loop(drone: System, slam: SlamMapper):
                 print("\n[CTL] Released – hovering")
             prev_key = active
 
-        await drone.offboard.set_velocity_body(
+        await drone.drone.offboard.set_velocity_body(
             VelocityBodyYawspeed(
                 forward_m_s    = state.forward_m_s,
                 right_m_s      = state.right_m_s,
@@ -321,64 +327,106 @@ async def control_loop(drone: System, slam: SlamMapper):
 
         await asyncio.sleep(dt)
 
-
-async def shutdown(drone: System, slam: SlamMapper, stop_event: asyncio.Event):
+# ── Shutdown ──────────────────────────────────────────────────────────────────
+async def shutdown(drone: Drone, odom_task: asyncio.Task,
+                   broadcaster: OdomTFBroadcaster):
     print("[MAVSDK] Shutting down ...")
     state.offboard_active = False
-    stop_event.set()
+
+    odom_task.cancel()
+    try:
+        await odom_task
+    except asyncio.CancelledError:
+        pass
 
     try:
-        await drone.offboard.stop()
+        await drone.drone.offboard.stop()
     except Exception:
         pass
     try:
-        await drone.action.disarm()
+        await drone.drone.action.disarm()
     except Exception:
         pass
 
-    slam.stop()
-    await asyncio.get_event_loop().run_in_executor(
-        None, slam.save_map, "slam_map.pcd"
-    )
+    broadcaster.destroy_node()
+    rclpy.shutdown()
     print("[MAVSDK] Done.")
 
-
 # ── Entry point ───────────────────────────────────────────────────────────────
-
 async def main():
-    drone      = System()
-    await connect(drone)
+    # 1. ROS2 init
     rclpy.init()
-    # ── Pose state shared between telemetry task and SlamMapper ───────────
-    pose_state = _PoseState()
+
+    # 2. Instantiate Drone and connect
+    drone = Drone()
+    await drone.connect()
+
+    # 3. OdomTFBroadcaster for ROS2 TF
     stop_event = asyncio.Event()
+    broadcaster = OdomTFBroadcaster(drone, stop_event)
 
-    # Start telemetry streams immediately (before takeoff)
-    # so pose_state is warm when mapping begins
-    asyncio.create_task(_pose_monitor(drone, pose_state, stop_event))
+    # 4. rclpy.spin in a daemon thread
+    spin_thread = threading.Thread(
+        target=ros_spin_thread,
+        args=(broadcaster,),
+        daemon=True,
+        name="ros_spin",
+    )
+    spin_thread.start()
+    print("[ROS2] Spin thread started.")
 
-    # ── Depth receiver + mapper ───────────────────────────────────────────
-    receiver = DepthReceiver(DEPTH_TOPIC)
-    
-    # slam.start() is called inside control_loop after takeoff
-    tf2_node = OdomTFBroadcaster(Drone=drone,stop_event=stop_event)
-    # ── Keyboard thread ───────────────────────────────────────────────────
-    kb = threading.Thread(target=keyboard_thread, daemon=True)
-    
+    # 5. Keyboard input in a daemon thread
+    kb = threading.Thread(target=keyboard_thread, daemon=True, name="keyboard")
     kb.start()
-    ros_thread = threading.Thread(target=rclpy.spin, args=(tf2_node,), daemon=True)
-    ros_thread.start()
-    
-    print("[INFO] Press T to arm & take off, then fly. M=map info, P=save, Q=quit.\n")
+
+    # 6. Telemetry (same Telemetry class used by mapperV2 / GlobalMapper)
+    telemetry = Telemetry()
+    telemetry_task = asyncio.create_task(
+        position_monitor_task(drone, telemetry, stop_event),
+        name="telemetry_monitor",
+    )
+
+    # 7. Mapping infrastructure – mirrors mapperV2.main() setup
+    bridge   = SharedState()
+    mapper   = GlobalMapper(K)
+    receiver = DepthReceiver("/depth_camera")
+
+    map_task = asyncio.create_task(
+        mapping_loop(mapper, receiver, telemetry, bridge),
+        name="mapping_loop",
+    )
+    vis_task = asyncio.create_task(
+        visualization_loop(bridge),          # reused verbatim from mapperV2
+        name="visualization_loop",
+    )
+
+    # 8. odom_monitor_task (original keyboardcontrol requirement)
+    odom_task = asyncio.create_task(
+        broadcaster.odom_monitor_task(),
+        name="odom_monitor",
+    )
+
+    print("[INFO] Press T to arm & take off, then use keys to fly.\n"
+          "[INFO] Press M to toggle mapping on/off.\n")
 
     try:
-        await control_loop(drone, slam)
+        await control_loop(drone)
     except asyncio.CancelledError:
         pass
     finally:
-        tf2_node.destroy_node()
-        rclpy.shutdown()
-        await shutdown(drone, slam, stop_event)
+        stop_event.set()
+        state.running = False
+
+        # Cancel mapping / vis tasks gracefully
+        for task in (map_task, vis_task, telemetry_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        await shutdown(drone, odom_task, broadcaster)
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
