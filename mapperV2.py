@@ -112,6 +112,7 @@ class DroneNavigation:
 
         try:
             while self.running:
+                t_start = time.monotonic()
                 depth_frame = self.receiver.get_frame()
                 if depth_frame is not None:
                     t = copy.copy(self.telemetry)  # Get a snapshot of telemetry state
@@ -120,8 +121,37 @@ class DroneNavigation:
                         print(f"Map updated with new frame at pose N:{t.north:.2f} E:{t.east:.2f} Yaw:{t.yaw_deg:.2f}")
                         self.bridge.push(updated)
                         # Check for frontiers and decide if we need to turn
-                await self.rotate_next_direction()
-                await asyncio.sleep(1.0 / self.loop_hz)
+                north, east, down, info = self.planner.compute_position_ned(
+                    depth_frame,
+                    self.pose,
+                    step_size=1.5
+                )
+                c = info['clearance']
+                if info['blocked']:
+                    await self.drone.send_velocity(0, 0, 0, self.target_yaw_deg)
+                    await self.rotate_next_direction()
+                else:
+                    # Ensure alignment before motion
+                    await self.align_to_grid()
+
+                    # -----------------------------------
+                    #  SEND POSITION SETPOINT
+                    # -----------------------------------
+                    await self.drone.send_position_setpoint(
+                        north=north,
+                        east=east,
+                        down=down,
+                        yaw_deg=self.target_yaw_deg
+                    )
+                
+                
+                #await self.rotate_next_direction()
+
+                # Maintain loop timing
+                elapsed = time.monotonic() - t_start
+                sleep_time = (1.0 / self.loop_hz) - elapsed
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
         except Exception as e:
             print(f"Error in navigation loop: {type(e).__name__}: {e}")
         except asyncio.CancelledError:
