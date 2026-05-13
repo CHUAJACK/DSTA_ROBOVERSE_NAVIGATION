@@ -34,6 +34,8 @@ import select
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from position_tf import ODOMtoBASELINKTF , Telemetry
+import rclpy
+
 
 # ── Tunable parameters ──────────────────────────────────────────────────────
 MAVSDK_ADDRESS   = "udp://:14540"
@@ -164,8 +166,8 @@ async def connect(drone: System):
     async for health in drone.telemetry.health():
         print(f"[HEALTH] GPS={health.is_global_position_ok}  "
               f"Home={health.is_home_position_ok}  "
-              f"Arm={health.is_armable}")
-        if health.is_global_position_ok and health.is_home_position_ok:
+              f"Armable?={health.is_armable}")
+        if health.is_home_position_ok:
             break
     print("[MAVSDK] Connected and healthy.")
 
@@ -268,18 +270,36 @@ async def shutdown(drone: System):
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 async def main():
+    rclpy.init()
     stop_event = asyncio.Event()
     drone = System()
     await connect(drone)
-    SharedTelemtryState = Telemetry()
-    odom_baselink_tf_broadcaster = ODOMtoBASELINKTF(drone=drone,state=SharedTelemtryState,stop_event=stop_event)
+
+    SharedTelemetryState = Telemetry()
+    odom_baselink_tf_broadcaster = ODOMtoBASELINKTF(
+        Drone=drone,
+        state=SharedTelemetryState,
+        stop_event=stop_event
+    )
+
+    # rclpy.spin in its own thread — non-blocking
+    ros_thread = threading.Thread(
+        target=rclpy.spin,
+        args=(odom_baselink_tf_broadcaster,),
+        daemon=True
+    )
+    ros_thread.start()
+
     kb = threading.Thread(target=keyboard_thread, daemon=True)
     kb.start()
 
     print("[INFO] Press T to arm & take off, then use keys to fly.\n")
-    rclpy.spin(odom_baselink_tf_broadcaster)
+
     try:
-        await control_loop(drone)
+        await asyncio.gather(
+            control_loop(drone),
+            odom_baselink_tf_broadcaster.position_monitor_task()
+        )
     except asyncio.CancelledError:
         pass
     finally:
@@ -287,7 +307,6 @@ async def main():
         await shutdown(drone)
         odom_baselink_tf_broadcaster.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == "__main__":
     try:
