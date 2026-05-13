@@ -1,0 +1,11 @@
+octomap_server_node:
+  ros__parameters:
+    resolution: 0.1              # voxel size in meters (0.05 = finer, 0.2 = coarser)
+    frame_id: "map"              # fixed world frame
+    base_frame_id: "base_link"   # your drone's base frame - adjust to match your URDF
+    height_map: false            # set true if you want 2D-style color by height
+    colored_map: false
+    filter_ground: false         # set true to remove ground plane
+    occupancy_min_z: -10.0       # min height of voxels to include
+    occupancy_max_z: 10.0        # max height of voxels to include
+    sensor_model/max_range: 5.0  # max depth camera range in meters

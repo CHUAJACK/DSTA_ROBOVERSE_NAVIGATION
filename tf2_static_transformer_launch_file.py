@@ -38,16 +38,17 @@ def generate_launch_description():
         Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
-            name='gz_ros_bridge_points',
-            output='screen',
+            name='gz_ros_bridge_clock',
             parameters=[{
-                # You can also pass a yaml file here, but for a single bridge, 
-                # we use the 'config' or arguments approach.
+                #'config_file': '', # Optional: You can use a YAML file instead
             }],
             arguments=[
-                # The syntax: /topic@ros_msg@gz_msg[direction]
+                # Clock Bridge
+                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+                # PointCloud Bridge
                 '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked'
-            ]
+            ],
+            output='screen'
         )
     
     ])
