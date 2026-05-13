@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-
+import os
 def generate_launch_description():
     return LaunchDescription([
         Node(
@@ -64,5 +64,13 @@ def generate_launch_description():
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
             }]
+        ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', os.path.expanduser('~/tf_pointcloud_rviz_config.rviz')],
+            parameters=[{'use_sim_time': True}],
+            output='screen'
         ),
     ])
