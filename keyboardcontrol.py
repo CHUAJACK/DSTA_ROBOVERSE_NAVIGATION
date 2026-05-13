@@ -34,8 +34,8 @@ import select
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from position_tf import ODOMtoBASELINKTF , Telemetry
+from octomapslicer import OctoMapSlicer
 import rclpy
-
 
 # ── Tunable parameters ──────────────────────────────────────────────────────
 MAVSDK_ADDRESS   = "udp://:14540"
@@ -57,6 +57,7 @@ class State:
     takeoff         : bool = False
     land            : bool = False
     offboard_active : bool = False
+    save_map : bool = False
 
 state = State()
 
@@ -166,8 +167,8 @@ async def connect(drone: System):
     async for health in drone.telemetry.health():
         print(f"[HEALTH] GPS={health.is_global_position_ok}  "
               f"Home={health.is_home_position_ok}  "
-              f"Armable?={health.is_armable}")
-        if health.is_home_position_ok:
+              f"Arm={health.is_armable}")
+        if health.is_global_position_ok and health.is_home_position_ok:
             break
     print("[MAVSDK] Connected and healthy.")
 
@@ -272,41 +273,38 @@ async def shutdown(drone: System):
 async def main():
     rclpy.init()
     stop_event = asyncio.Event()
+
     drone = System()
     await connect(drone)
 
-    SharedTelemetryState = Telemetry()
-    odom_baselink_tf_broadcaster = ODOMtoBASELINKTF(
-        Drone=drone,
-        state=SharedTelemetryState,
-        stop_event=stop_event
-    )
-
-    # rclpy.spin in its own thread — non-blocking
-    ros_thread = threading.Thread(
+    shared_telemetry = Telemetry()
+    tf_node = ODOMtoBASELINKTF(drone=drone, state=shared_telemetry, stop_event=stop_event)
+    octomap_node = OctoMapSlicer()
+    octomap_thread = threading.Thread(
         target=rclpy.spin,
-        args=(odom_baselink_tf_broadcaster,),
+        args=(octomap_node,),
         daemon=True
     )
-    ros_thread.start()
-
     kb = threading.Thread(target=keyboard_thread, daemon=True)
     kb.start()
+    octomap_thread.start()
 
     print("[INFO] Press T to arm & take off, then use keys to fly.\n")
 
     try:
         await asyncio.gather(
             control_loop(drone),
-            odom_baselink_tf_broadcaster.position_monitor_task()
+            tf_node.position_monitor_task()   # ← same event loop, no thread needed
         )
     except asyncio.CancelledError:
         pass
     finally:
         stop_event.set()
         await shutdown(drone)
-        odom_baselink_tf_broadcaster.destroy_node()
+        tf_node.destroy_node()
+        octomap_node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     try:
