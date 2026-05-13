@@ -47,5 +47,22 @@ def generate_launch_description():
                 '--frame-id', 'map',
                 '--child-frame-id', 'odom'
             ]
-        )        
+        ),   
+        Node(
+            package='octomap_server',
+            executable='octomap_server_node',
+            name='octomap_server',
+            output='screen',
+            remappings=[
+                ('cloud_in', '/depth_camera/points'),
+            ],
+            parameters=[{
+                'resolution': 0.1,
+                'frame_id': 'map',
+                'base_frame_id': 'base_link',
+                'sensor_model.max_range': 5.0,
+                'transform_tolerance': 0.5,
+                'use_sim_time': True,
+            }]
+        ),
     ])
