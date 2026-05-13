@@ -4,26 +4,21 @@ from launch_ros.actions import Node
 def generate_launch_description():
     return LaunchDescription([
         Node(
-            package='tf2_ros',
-            executable='static_transform_publisher',
-            name='base_link_to_odom',
+            package='ros_gz_bridge',
+            executable='parameter_bridge',
+            name='gz_ros_bridge_clock',
+            parameters=[{'use_sim_time': True}],      # ← add
             arguments=[
-                '--x', '0',
-                '--y', '0',
-                '--z', '0',
-                '--qx', '0',
-                '--qy', '0',
-                '--qz', '0',
-                '--qw', '1',
-                '--frame-id', 'odom',
-                '--child-frame-id', 'base_link'
-            ]
+                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
+                '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked'
+            ],
+            output='screen'
         ),
-
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='camera_to_base_link',
+            parameters=[{'use_sim_time': True}],      # ← add
             arguments=[
                 '--x', '0.12',
                 '--y', '0.03',
@@ -36,15 +31,15 @@ def generate_launch_description():
                 '--child-frame-id', 'camera_link'
             ]
         ),
-
         Node(
             package='tf2_ros',
             executable='static_transform_publisher',
             name='odom_to_map',
+            parameters=[{'use_sim_time': True}],      # ← add
             arguments=[
-                '--x', '0',
-                '--y', '0',
-                '--z', '0',
+                '--x', '0.0',
+                '--y', '0.0',
+                '--z', '0.0',
                 '--qx', '0',
                 '--qy', '0',
                 '--qz', '0',
@@ -52,5 +47,5 @@ def generate_launch_description():
                 '--frame-id', 'map',
                 '--child-frame-id', 'odom'
             ]
-        ),
+        )        
     ])

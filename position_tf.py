@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-
-import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped
@@ -8,6 +6,7 @@ from drone_control import Drone
 from mavsdk.offboard import VelocityNedYaw
 import math
 import tf2_ros
+import rclpy
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import asyncio
@@ -31,9 +30,13 @@ class Telemetry:
         self.down = None
 
 class ODOMtoBASELINKTF(Node):
-    def __init__(self,drone:Drone,state: Telemetry,stop_event:asyncio.Event):
+    def __init__(self,Drone:Drone,state: Telemetry,stop_event:asyncio.Event):
         super().__init__('ned_to_enu_converter')
-
+        self.set_parameters([rclpy.parameter.Parameter(
+            'use_sim_time',
+            rclpy.Parameter.Type.BOOL,
+            True
+        )])
         # TF broadcaster
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
 
@@ -43,12 +46,16 @@ class ODOMtoBASELINKTF(Node):
             [0,  0, -1]
         ])
         self.state = state
-        self.drone = drone
+        self.drone = Drone
         self.stop_event = stop_event
+        self.get_logger().info('Waiting for sim clock...')
+        while self.get_clock().now().nanoseconds == 0:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        self.get_logger().info(f'Sim clock ready: {self.get_clock().now().to_msg()}')
 
     async def position_monitor_task(self):
         async def stream_position():
-            async for pos_vel in self.drone.drone.telemetry.position_velocity_ned():
+            async for pos_vel in self.drone.telemetry.position_velocity_ned():
                 if self.stop_event.is_set():
                     break
                 self.state.north = pos_vel.position.north_m
@@ -58,7 +65,7 @@ class ODOMtoBASELINKTF(Node):
                     self.odom_callback()
 
         async def stream_orientation():
-            async for att in self.drone.drone.telemetry.attitude_euler():
+            async for att in self.drone.telemetry.attitude_euler():
                 if self.stop_event.is_set():
                     break
                 self.state.yaw_deg = att.yaw_deg
