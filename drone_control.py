@@ -69,7 +69,7 @@ class Drone:
         target_yaw_deg = self._normalize_yaw(target_yaw_deg)
 
         # PID gains (tune these!)
-        Kp = 0.8
+        Kp = 2.0
         Ki = 0.0
         Kd = 0.2
 
