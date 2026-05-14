@@ -1,5 +1,5 @@
-## Octomap mapping
-### How to start everything
+# Octomap mapping
+## How to start everything
 ### Terminal 1:
 ##### 
 ```
@@ -19,4 +19,11 @@
 ```
 > cd __directory__
 > python3 keyboardcontrol.py
-```
+``` 
+
+## Configure parameters
+### tf starter starts :
+1. #### static transforms
+2. #### gazebo -> ros2 bridge topics for depth_camera/points and clock
+3. #### octomap_server node
+4. #### rviz (change path to rviz config path)
