@@ -60,7 +60,7 @@ def generate_launch_description():
                 'resolution': 0.1,
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
-                'sensor_model.max_range': 5.0,
+                'sensor_model.max_range': 15.0,
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
             }]
