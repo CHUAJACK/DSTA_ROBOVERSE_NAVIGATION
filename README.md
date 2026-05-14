@@ -1,4 +1,11 @@
 # Octomap mapping
+## install dependencies
+####
+```
+sudo apt install ros-humble-octomap  ros-humble-octomap-msgs ros-humble-octomap-ros  ros-humble-octomap-mapping  ros-humble-octomap-server
+
+sudo apt install liboctomap-dev
+```
 ## How to start everything
 ### Terminal 1:
 ##### 
