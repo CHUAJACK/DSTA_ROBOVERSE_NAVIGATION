@@ -63,14 +63,33 @@ def generate_launch_description():
                 'sensor_model.max_range': 15.0,
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
+                'ground_filter': True,
+                'occupancy_min_z':0.2
             }]
         ),
         Node(
             package='rviz2',
             executable='rviz2',
             name='rviz2',
-            arguments=['-d', os.path.expanduser('./tf_pointcloud_rviz_config.rviz')],
+            arguments=['-d', os.path.expanduser('./backup.rviz')],
             parameters=[{'use_sim_time': True}],
             output='screen'
         ),
+        Node(
+            package="octomap_2d_slicer",
+            executable="octomap_2d_slicer_node",
+            name="octomap_2d_slicer",
+            output="screen",
+            parameters=[{
+                "drone_frame":     'base_link',
+                "world_frame":     'map',
+                "slice_thickness": 0.1,
+                "use_sim_time": True,
+            }],
+            remappings=[
+                # remap if your topics differ
+                # ("octomap_binary", "/octomap_binary"),
+                # ("octomap_2d_slice", "/map_2d"),
+            ],
+        )
     ])
