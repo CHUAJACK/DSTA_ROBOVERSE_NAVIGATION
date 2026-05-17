@@ -60,11 +60,13 @@ def generate_launch_description():
                 'resolution': 0.1,
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
-                'sensor_model.max_range': 15.0,
+                'sensor_model.max_range': 16.0,
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
                 'ground_filter': True,
-                'occupancy_min_z':0.2
+                'occupancy_min_z':0.2,
+                'sensor_model/hit':       0.7,
+                'sensor_model/miss':      0.4,
             }]
         ),
         Node(
@@ -83,7 +85,7 @@ def generate_launch_description():
             parameters=[{
                 "drone_frame":     'base_link',
                 "world_frame":     'map',
-                "slice_thickness": 0.1,
+                "slice_thickness": 0.4,
                 "use_sim_time": True,
             }],
             remappings=[
