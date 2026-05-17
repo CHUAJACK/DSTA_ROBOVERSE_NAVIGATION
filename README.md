@@ -6,6 +6,22 @@ sudo apt install ros-humble-octomap  ros-humble-octomap-msgs ros-humble-octomap
 
 sudo apt install liboctomap-dev
 ```
+
+## install packages
+####
+```
+git clone https://github.com/CHUAJACK/DSTA_ROBOVERSE_NAVIGATION.git
+git checkout octo
+
+mkdir src
+cd src
+
+git clone https://github.com/CHUAJACK/octomap_z_slicer.git
+cd ..
+colcon build --packages-select octomap_2d_slicer
+```
+
+
 ## How to start everything
 ### Terminal 1:
 ##### 
