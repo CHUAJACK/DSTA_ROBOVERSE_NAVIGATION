@@ -34,7 +34,6 @@ import select
 from mavsdk import System
 from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from position_tf import ODOMtoBASELINKTF , Telemetry
-from octomapslicer import OctoMapSlicer
 import rclpy
 
 # ── Tunable parameters ──────────────────────────────────────────────────────
@@ -168,7 +167,7 @@ async def connect(drone: System):
         print(f"[HEALTH] GPS={health.is_global_position_ok}  "
               f"Home={health.is_home_position_ok}  "
               f"Arm={health.is_armable}")
-        if health.is_global_position_ok and health.is_home_position_ok:
+        if health.is_home_position_ok:
             break
     print("[MAVSDK] Connected and healthy.")
 
@@ -278,23 +277,21 @@ async def main():
     await connect(drone)
 
     shared_telemetry = Telemetry()
-    tf_node = ODOMtoBASELINKTF(drone=drone, state=shared_telemetry, stop_event=stop_event)
-    octomap_node = OctoMapSlicer()
-    octomap_thread = threading.Thread(
+    tf_node = ODOMtoBASELINKTF(Drone=drone, state=shared_telemetry, stop_event=stop_event)
+    tf_spin_thread = threading.Thread(
         target=rclpy.spin,
-        args=(octomap_node,),
+        args=(tf_node,),
         daemon=True
     )
     kb = threading.Thread(target=keyboard_thread, daemon=True)
     kb.start()
-    octomap_thread.start()
-
+    tf_spin_thread.start()
     print("[INFO] Press T to arm & take off, then use keys to fly.\n")
 
     try:
         await asyncio.gather(
             control_loop(drone),
-            tf_node.position_monitor_task()   # ← same event loop, no thread needed
+            tf_node.position_monitor_task() 
         )
     except asyncio.CancelledError:
         pass
@@ -302,7 +299,6 @@ async def main():
         stop_event.set()
         await shutdown(drone)
         tf_node.destroy_node()
-        octomap_node.destroy_node()
         rclpy.shutdown()
 
 
