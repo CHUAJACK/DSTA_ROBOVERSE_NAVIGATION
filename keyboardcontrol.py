@@ -56,7 +56,6 @@ class State:
     takeoff         : bool = False
     land            : bool = False
     offboard_active : bool = False
-    save_map : bool = False
 
 state = State()
 
@@ -283,6 +282,8 @@ async def main():
         args=(tf_node,),
         daemon=True
     )
+
+
     kb = threading.Thread(target=keyboard_thread, daemon=True)
     kb.start()
     tf_spin_thread.start()
@@ -296,10 +297,7 @@ async def main():
     except asyncio.CancelledError:
         pass
     finally:
-        stop_event.set()
         await shutdown(drone)
-        tf_node.destroy_node()
-        rclpy.shutdown()
 
 
 if __name__ == "__main__":
