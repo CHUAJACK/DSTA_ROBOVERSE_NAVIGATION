@@ -57,14 +57,15 @@ def generate_launch_description():
                 ('cloud_in', '/depth_camera/points'),
             ],
             parameters=[{
-                'resolution': 0.1,
+                'resolution': 0.3,
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
                 'sensor_model.max_range': 16.0,
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
                 'ground_filter': True,
-                'occupancy_min_z':0.2,
+                'occupancy_min_z':0.3,
+                'occupancy_max_z':8.0,
                 'sensor_model/hit':       0.7,
                 'sensor_model/miss':      0.4,
             }]
