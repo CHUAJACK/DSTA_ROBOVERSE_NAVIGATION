@@ -56,7 +56,6 @@ class ODOMtoBASELINKTF(Node):
         self.state = state
         self.drone = Drone
         self.stop_event = stop_event
-        self._last_tf_stamp_ns = 0  # guard against sim clock going backward
 
         # Wait until sim clock is received before doing anything
         self.get_logger().info('Waiting for sim clock...')
@@ -104,11 +103,6 @@ class ODOMtoBASELINKTF(Node):
             print(f"Monitor error: {type(e).__name__}: {e}")
 
     def odom_callback(self):
-        now_ns = self.get_clock().now().nanoseconds
-        if now_ns <= self._last_tf_stamp_ns:
-            return  # sim clock went backward — skip to avoid TF buffer flush
-        self._last_tf_stamp_ns = now_ns
-
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = 'odom'
