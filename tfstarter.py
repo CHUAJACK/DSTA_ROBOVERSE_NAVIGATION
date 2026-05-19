@@ -10,9 +10,25 @@ def generate_launch_description():
             parameters=[{'use_sim_time': True}],      # ← add
             arguments=[
                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-                '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked'
+                # '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
             ],
             output='screen'
+        ),
+        Node(
+            package="depth_to_pointcloud",
+            executable="depth_to_pointcloud_node",
+            name="gz_depth_republisher",
+            output="screen",
+            parameters=[
+                {
+                    "gz_depth": "/depth_camera",
+                    "gz_camera_info":  "/camera_info",
+                    "output_topic":      "/depth_camera_bridged/points",
+                    "null_range_min":      0.95,
+                    "null_range_max":      1.0,
+                    "downsample": 3,
+                },
+            ],
         ),
         Node(
             package='tf2_ros',
@@ -54,7 +70,7 @@ def generate_launch_description():
             name='octomap_server',
             output='screen',
             remappings=[
-                ('cloud_in', '/depth_camera/points'),
+                ('cloud_in', '/depth_camera_bridged/points'),
             ],
             parameters=[{
                 'resolution': 0.25,
@@ -68,7 +84,6 @@ def generate_launch_description():
                 'occupancy_max_z':8.0,
                 'sensor_model/hit':       0.7,
                 'sensor_model/miss':      0.4,
-                'latch': False,
             }]
         ),
         Node(
