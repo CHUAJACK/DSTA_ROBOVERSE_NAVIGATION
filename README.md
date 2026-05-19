@@ -35,6 +35,7 @@ pip install mavsdk
 
 ```bash
 git clone https://github.com/CHUAJACK/DSTA_ROBOVERSE_NAVIGATION.git
+git clone https://github.com/CHUAJACK/PointCloudRangeFilter.git
 cd DSTA_ROBOVERSE_NAVIGATION
 git checkout octoZD
 
@@ -42,7 +43,7 @@ mkdir src && cd src
 git clone https://github.com/CHUAJACK/octomap_z_slicer.git
 cd ..
 
-colcon build --packages-select octomap_2d_slicer
+colcon build
 ```
 
 ---
