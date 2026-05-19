@@ -56,6 +56,7 @@ class ODOMtoBASELINKTF(Node):
         self.state = state
         self.drone = Drone
         self.stop_event = stop_event
+        self._last_tf_stamp_ns = 0  # guard against sim clock going backward
 
         # Wait until sim clock is received before doing anything
         self.get_logger().info('Waiting for sim clock...')
@@ -103,18 +104,21 @@ class ODOMtoBASELINKTF(Node):
             print(f"Monitor error: {type(e).__name__}: {e}")
 
     def odom_callback(self):
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns <= self._last_tf_stamp_ns:
+            return  # sim clock went backward — skip to avoid TF buffer flush
+        self._last_tf_stamp_ns = now_ns
+
         t = TransformStamped()
         t.header.stamp = self.get_clock().now().to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
 
-        # FIX 3: Explicit axis swap instead of matrix multiply for position
         # NED → ENU: X=East=NED_Y, Y=North=NED_X, Z=Up=-NED_Down
         t.transform.translation.x =  self.state.east   # NED East  → ENU X
         t.transform.translation.y =  self.state.north  # NED North → ENU Y
         t.transform.translation.z = -self.state.down   # NED Down  → ENU Z (flip sign)
-        test = R.from_euler('ZYX', [0, 0, 0], degrees=True)  # flat drone facing North
-        result = self.ned_to_enu * test
+
         # Orientation: apply NED→ENU frame rotation to the body quaternion
         rot_ned = R.from_quat(
             [
