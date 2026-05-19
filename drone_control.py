@@ -57,7 +57,7 @@ class Drone:
             return att.yaw_deg
 
     async def send_velocity(self, vx, vy, vz,yaw_deg):
-        await self.drone.offboard.set_velocity_ned(VelocityNedYaw(north_m_s=vx, east_m_s=vy, down_m_s=vz, yaw_deg=yaw_deg))
+         await self.drone.offboard.set_velocity_ned(VelocityNedYaw(north_m_s=vx, east_m_s=vy, down_m_s=vz, yaw_deg=yaw_deg))
 
     async def send_position_setpoint(self, north, east, down, yaw_deg):
         await self.drone.offboard.set_position_ned(PositionNedYaw(north_m=north, east_m=east, down_m=down, yaw_deg=yaw_deg))
@@ -135,3 +135,33 @@ class Drone:
     async def turn_cw_180(self):
         current = await self.get_yaw()
         await self.rotate_to_yaw(current + 180)
+
+    async def wait_until_position_reached(
+    self,
+    target_north,
+    target_east,
+    target_down,
+    target_yaw, # degrees
+    pos_tolerance=0.1, # degrees
+    yaw_tolerance=5.0, # degrees
+    ):
+
+        while True:
+            north, east, down = await self.get_position()
+            
+            # Calc euclidean distance
+            distance_error = math.sqrt(
+                (target_north - north) ** 2 +
+                (target_east - east) ** 2 +
+                (target_down - down) ** 2
+            )
+
+            yaw = await self.get_yaw()
+            # Calc yaw error
+            yaw_error = abs(yaw - target_yaw)
+
+            if distance_error < pos_tolerance and yaw_error < yaw_tolerance:
+                print(f"Reached target, error={distance_error:.2f} m")
+                return True
+
+            await asyncio.sleep(0.1)
