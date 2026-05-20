@@ -17,8 +17,6 @@ import math
 import threading
 import time
 import types
-import time
-import types
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -39,18 +37,18 @@ from frontier_detector import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MAVSDK_ADDRESS  = "udp://:14540"
-TAKEOFF_ALT_M   = 3.0          # metres AGL
+TAKEOFF_ALT_M   = 3.2          # metres AGL
 
 # Frontier scoring weights (set any weight to 0 to disable that term)
-W_DISTANCE = 2.0    #              — prefer closer frontiers
-W_DISTANCE_ORDER= 2 # 1/dist^n     — make distance more punishing
+W_DISTANCE = 2.0    
+W_DIST_ORDER = 1  # 1/dist       — prefer closer frontiers
 W_SIZE     = 0.5    # log(size)    — prefer information-rich clusters
 W_HEADING  = 0.3    # cos(Δangle)  — prefer frontiers ahead of drone
 
 
 # Velocity controller
-KP_XY          = 0.8    # proportional gain (m/s per m error)
-MAX_SPEED      = 2.2    # m/s horizontal
+KP_XY          = 1.0    # proportional gain (m/s per m error)
+MAX_SPEED      = 3.0    # m/s horizontal
 APPROACH_SPEED = 1.0    # m/s — speed cap when within APPROACH_DIST of final goal
 APPROACH_DIST  = 3.0    # m — distance from final goal at which speed is capped
 ARRIVAL_DIST   = 1.0    # m — intermediate waypoint reached
@@ -63,15 +61,11 @@ SWEEP_POST_WAIT = 1.0     # seconds to wait after sweep for OctoMap to catch up
 
 # A* / planning
 INFLATION      = 2    # grid cells to inflate around obstacles
-INFLATION      = 2    # grid cells to inflate around obstacles
 MIN_CLUSTER    = 3    # ignore frontier clusters smaller than this
 VISITED_RADIUS = 0.75  # m — skip re-visiting frontiers within this radius
 
 CONTROL_HZ = 10       # velocity setpoint rate
 
-REPLAN_INTERVAL_S   = 0.2   # seconds between frontier recheck during flight
-REPLAN_MIN_SAVING_M = 3.0   # abort path if a new frontier is this much closer (metres)
-REPLAN_WALL_COST_THR = 3.5  # replan if a remaining waypoint is this close to a wall (wall cost units, max possible = 3.0)
 REPLAN_INTERVAL_S   = 0.2   # seconds between frontier recheck during flight
 REPLAN_MIN_SAVING_M = 3.0   # abort path if a new frontier is this much closer (metres)
 REPLAN_WALL_COST_THR = 3.5  # replan if a remaining waypoint is this close to a wall (wall cost units, max possible = 3.0)
@@ -81,37 +75,11 @@ SWEEP_MAP_FRAMES    = 3     # wait for this many new map frames after sweep befo
 SWEEP_KNOWN_RADIUS_M = 4.0  # skip yaw sweep if no UNKNOWN cells within this radius (m)
 
 
-SWEEP_KNOWN_RADIUS_M = 4.0  # skip yaw sweep if no UNKNOWN cells within this radius (m)
-
-
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GRID UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def pad_grid(grid, meta, padding=1):
-    """Wrap the grid in UNKNOWN cells and shift the metadata origin to match."""
-    rows, cols = len(grid), len(grid[0])
-    new_rows, new_cols = rows + 2 * padding, cols + 2 * padding
-    padded = [[UNKNOWN] * new_cols for _ in range(new_rows)]
-    for r in range(rows):
-        for c in range(cols):
-            padded[r + padding][c + padding] = grid[r][c]
-    res = meta.resolution
-    new_meta = types.SimpleNamespace(
-        resolution=res,
-        height=new_rows,
-        width=new_cols,
-        origin=types.SimpleNamespace(
-            position=types.SimpleNamespace(
-                x=meta.origin.position.x - padding * res,
-                y=meta.origin.position.y - padding * res,
-            )
-        ),
-    )
-    return padded, new_meta
-
 
 def pad_grid(grid, meta, padding=1):
     """Wrap the grid in UNKNOWN cells and shift the metadata origin to match."""
@@ -180,26 +148,6 @@ def nearest_free(grid, r, c, radius=5):
                         return nr, nc
     return None
 
-
-WALL_COSTS = [3.0, 3.0, 1.5, 0.5]   # cost penalty at distance 1, 2, 3, 4 cells from a wall
-
-def surroundings_known(grid, robot_rc, radius_m, resolution):
-    """Return True if every UNKNOWN cell within radius_m is occluded by a wall.
-    UNKNOWN cells that are line-of-sight visible from robot_rc still count as unknown."""
-    r0, c0 = robot_rc
-    r_cells = int(math.ceil(radius_m / resolution))
-    rows, cols = len(grid), len(grid[0])
-    r_sq = r_cells * r_cells
-    for dr in range(-r_cells, r_cells + 1):
-        for dc in range(-r_cells, r_cells + 1):
-            if dr * dr + dc * dc > r_sq:
-                continue
-            nr, nc = r0 + dr, c0 + dc
-            if not (0 <= nr < rows and 0 <= nc < cols):
-                continue
-            if grid[nr][nc] == UNKNOWN and _line_clear(grid, robot_rc, (nr, nc)):
-                return False
-    return True
 
 WALL_COSTS = [3.0, 3.0, 1.5, 0.5]   # cost penalty at distance 1, 2, 3, 4 cells from a wall
 
@@ -294,7 +242,6 @@ def astar(grid, start, goal, wcosts=None):
                     continue
             wall_pen = wcosts[nb[0]][nb[1]] if wcosts else 0.0
             ng = g_cur + cost + (8.0 if grid[nb[0]][nb[1]] == UNKNOWN else 0.0) + wall_pen
-            ng = g_cur + cost + (8.0 if grid[nb[0]][nb[1]] == UNKNOWN else 0.0) + wall_pen
             if ng < g_score.get(nb, float('inf')):
                 g_score[nb] = ng
                 came_from[nb] = cur
@@ -359,26 +306,6 @@ def smooth_waypoints_ned(waypoints_ne, grid, meta, iterations=15, weight=0.6):
         return waypoints_ne
     rows, cols = len(grid), len(grid[0])
     p = [list(wp) for wp in waypoints_ne]
-def densify_waypoints(waypoints_ne, step_m=0.5):
-    """Insert intermediate points every step_m metres along each segment."""
-    if len(waypoints_ne) < 2:
-        return waypoints_ne
-    result = [waypoints_ne[0]]
-    for (n0, e0), (n1, e1) in zip(waypoints_ne, waypoints_ne[1:]):
-        dist = math.hypot(n1 - n0, e1 - e0)
-        n_steps = max(1, int(dist / step_m))
-        for k in range(1, n_steps + 1):
-            t = k / n_steps
-            result.append((n0 + t * (n1 - n0), e0 + t * (e1 - e0)))
-    return result
-
-
-def smooth_waypoints_ned(waypoints_ne, grid, meta, iterations=15, weight=0.6):
-    """Gradient smoother on densified NED waypoints with LOS safety checks."""
-    if len(waypoints_ne) <= 2:
-        return waypoints_ne
-    rows, cols = len(grid), len(grid[0])
-    p = [list(wp) for wp in waypoints_ne]
     for _ in range(iterations):
         for i in range(1, len(p) - 1):
             cn = p[i][0] * (1.0 - weight) + (p[i-1][0] + p[i+1][0]) / 2.0 * weight
@@ -394,7 +321,6 @@ def smooth_waypoints_ned(waypoints_ne, grid, meta, iterations=15, weight=0.6):
                _line_clear(grid, (pr, pc), (r_next, c_next)):
                 p[i] = [cn, ce]
     return [tuple(wp) for wp in p]
-
 
 
 
@@ -432,20 +358,7 @@ class MapNode(Node):
                 v = raw[r * cols + c]
                 row.append(BLOCKED if v >= 50 else (UNKNOWN if v == -1 else FREE))
             grid.append(row)
-
-        # Wrap the grid with a 5-cell border of UNKNOWN
-        border = 5
-        new_cols = cols + border * 2
-        unknown_row = [UNKNOWN] * new_cols
-        padded = []
-        for _ in range(border):
-            padded.append(unknown_row[:])
-        for row in grid:
-            padded.append([UNKNOWN] * border + row + [UNKNOWN] * border)
-        for _ in range(border):
-            padded.append(unknown_row[:])
-
-        grid, meta = pad_grid(padded, msg.info)
+        grid, meta = pad_grid(grid, msg.info)
         with self._lock:
             self._grid = grid
             self._meta = meta
@@ -515,9 +428,7 @@ class FrontierExplorer:
         self.map     = map_node
         self.visited = []        # (north, east) of explored frontiers
         self._goal_fails = {}    # grid_rc -> consecutive failure count (A* + follow_path)
-        self._goal_fails = {}    # grid_rc -> consecutive failure count (A* + follow_path)
         self._skip = set()       # temporarily unreachable frontiers (cleared on success)
-        self._wall_replan_cooldown = 0.0  # persists across follow_path calls
         self._wall_replan_cooldown = 0.0  # persists across follow_path calls
 
     # ── internals ────────────────────────────────────────────────────────────
@@ -544,7 +455,7 @@ class FrontierExplorer:
         frontier_n, frontier_e = ey, ex         # NED
 
         dist_cells = math.hypot(cr - robot_r, cc - robot_c)
-        dist_score = W_DISTANCE / (dist_cells + 1.0)  ** W_DISTANCE_ORDER
+        dist_score = W_DISTANCE / (dist_cells + 1.0) ** W_DIST_ORDER
 
         size_score = W_SIZE * math.log1p(len(cluster))
 
