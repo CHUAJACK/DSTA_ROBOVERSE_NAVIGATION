@@ -36,6 +36,7 @@ pip install numpy
 
 ```bash
 git clone https://github.com/CHUAJACK/DSTA_ROBOVERSE_NAVIGATION.git
+git clone https://github.com/CHUAJACK/PointCloudRangeFilter.git
 cd DSTA_ROBOVERSE_NAVIGATION
 git checkout octoZD
 

@@ -19,6 +19,23 @@ def generate_launch_description():
             ],
             output='screen',
         ),
+        # ── Custom Cloud publisher ────────────────────────────────────────────
+        Node(
+            package="depth_to_pointcloud",
+            executable="depth_to_pointcloud_node",
+            name="gz_depth_republisher",
+            output="screen",
+            parameters=[
+                {
+                    "gz_depth": "/depth_camera",
+                    "gz_camera_info":  "/camera_info",
+                    "output_topic":      "/depth_camera_bridged/points",
+                    "null_range_min":      0.95,
+                    "null_range_max":      1.0,
+                    "downsample": 3,
+                },
+            ],
+        ),
 
         # ── PointCloud Republisher ───────────────────────────────────────────
         Node(
