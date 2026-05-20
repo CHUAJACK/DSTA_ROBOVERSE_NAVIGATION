@@ -83,9 +83,6 @@ def generate_launch_description():
                 'sensor_model/hit': 0.95,
                 'sensor_model/miss': 0.3,
                 'latch':False,
-
-
-   
             }],
         ),
 
