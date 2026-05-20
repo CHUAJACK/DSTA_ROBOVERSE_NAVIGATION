@@ -15,12 +15,12 @@ def generate_launch_description():
             parameters=[{'use_sim_time': True}],
             arguments=[
                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-                # '/depth_camera/points@sensor_msgs/msg/PointCloud2[goutput="screenz.msgs.PointCloudPacked',
+             #   '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
             ],
             output='screen',
         ),
 
-        # ── Custom Cloud publisher ──────────────────",
+        # ── PointCloud Republisher ───────────────────────────────────────────
         Node(
             package="depth_to_pointcloud",
             executable="depth_to_pointcloud_node",
@@ -34,6 +34,7 @@ def generate_launch_description():
                     "null_range_min":      0.95,
                     "null_range_max":      1.0,
                     "downsample": 3,
+                    "danger_threshold": 3.0
                 },
             ],
         ),
@@ -68,18 +69,23 @@ def generate_launch_description():
             executable='octomap_server_node',
             name='octomap_server',
             output='screen',
-            remappings=[('cloud_in', '/depth_camera/points')],
+            remappings=[('cloud_in', '/depth_camera_bridged/points')],
             parameters=[{
-                'resolution': 0.35,
+                'resolution': 0.35,  
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
                 'sensor_model.max_range': 10.0,
                 'transform_tolerance': 0.5,
                 'use_sim_time': True,
-                'occupancy_min_z': 0.3,
+                'ground_filter': True,
+                'occupancy_min_z': 0.8,
                 'occupancy_max_z': 8.0,
-                'sensor_model/hit': 0.7,
-                'sensor_model/miss': 0.4,
+                'sensor_model/hit': 0.95,
+                'sensor_model/miss': 0.3,
+                'latch':False,
+
+
+   
             }],
         ),
 
@@ -93,6 +99,7 @@ def generate_launch_description():
                 'drone_frame': 'base_link',
                 'world_frame': 'map',
                 'slice_thickness': 0.4,
+                'publish_rate_ms': 50,
                 'use_sim_time': True,
             }],
         ),
