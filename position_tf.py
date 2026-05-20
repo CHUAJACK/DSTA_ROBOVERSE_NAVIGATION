@@ -108,13 +108,11 @@ class ODOMtoBASELINKTF(Node):
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
 
-        # FIX 3: Explicit axis swap instead of matrix multiply for position
         # NED → ENU: X=East=NED_Y, Y=North=NED_X, Z=Up=-NED_Down
         t.transform.translation.x =  self.state.east   # NED East  → ENU X
         t.transform.translation.y =  self.state.north  # NED North → ENU Y
         t.transform.translation.z = -self.state.down   # NED Down  → ENU Z (flip sign)
-        test = R.from_euler('ZYX', [0, 0, 0], degrees=True)  # flat drone facing North
-        result = self.ned_to_enu * test
+
         # Orientation: apply NED→ENU frame rotation to the body quaternion
         rot_ned = R.from_quat(
             [
