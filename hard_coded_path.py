@@ -134,46 +134,24 @@ async def control_loop(drone: Drone, state: SharedState, stop_event: asyncio.Eve
             # Clear short tower hole
             for coord in coords:
                 print(coord[0])
-                await drone.send_position_setpoint(
+                await drone.custom_position_setpoint(
                     north=coord[1],
                     east=coord[2],
                     down=coord[3],
                     yaw_deg=coord[4],
                 )
                 print("waiting")
-                await drone.wait_until_position_reached(
-                    target_north=coord[1],
-                    target_east=coord[2],
-                    target_down=coord[3],
-                    target_yaw=coord[4],
+                # Hold new position
+                await drone.send_position_setpoint(
+                    north=coord[1],
+                    east=coord[2],
+                    down=coord[3],
+                    yaw_deg=coord[4],
                 )
             stop_event.set()
             # your control logic ends here using pos and yaw, e.g. compute errors and send velocity commands
 
             await asyncio.sleep(dt)
-        
-        # For debugging and getting new coords
-        # land = False
-        # while True:
-        #     land = await asyncio.to_thread(input, "Land? ")
-        #     if land in ["yes","Yes","y","Y"]:
-        #         break
-
-        #     line = await asyncio.to_thread(input, "N E D Y: ")
-        #     N, E, D, Y = map(float, line.split())
-        #     await drone.send_position_setpoint(
-        #         north=N,
-        #         east=E,
-        #         down=D,
-        #         yaw_deg=Y,
-        #     )
-        #     print("waiting")
-        #     await drone.wait_until_position_reached(
-        #         target_north=N,
-        #         target_east=E,
-        #         target_down=D,
-        #         target_yaw=Y,
-        #     )
         
         await drone.land()  
 

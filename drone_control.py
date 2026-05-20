@@ -7,6 +7,17 @@ import math
 class Drone:
     def __init__(self):
         self.drone = System()
+        # PID memory for position control
+        self.prev_error_north = 0.0
+        self.prev_error_east = 0.0
+        self.prev_error_down = 0.0
+
+        self.integral_error_north = 0.0
+        self.integral_error_east = 0.0
+        self.integral_error_down = 0.0
+
+        self.prev_error_yaw = 0.0
+        self.integral_error_yaw = 0.0
 
     def _normalize_yaw(self, yaw_deg):
         while yaw_deg > 180:
@@ -58,6 +69,106 @@ class Drone:
 
     async def send_velocity(self, vx, vy, vz,yaw_deg):
          await self.drone.offboard.set_velocity_ned(VelocityNedYaw(north_m_s=vx, east_m_s=vy, down_m_s=vz, yaw_deg=yaw_deg))
+
+    async def custom_position_setpoint(self, north, east, down, yaw_deg):
+        # PID constants
+        Kp_velo = 2.0
+        Ki_velo = 0.0
+        Kd_velo = 6.0
+
+        I_max = 0.0
+        max_velo = 10
+
+        Kp_yaw = 2.0
+        Ki_yaw = 0.0
+        Kd_yaw = 4.0
+        max_yaw_velo = 90
+
+        I_max_yaw = 0.0
+
+        while not await self.is_position_reached(north, east, down, yaw_deg):
+            curr_pos_n, curr_pos_e, curr_pos_d = await self.get_position()
+            curr_yaw = await self.get_yaw()
+
+            # =========================
+            # NORTH PID
+            # =========================
+            n_error = north - curr_pos_n
+            n_P = n_error * Kp_velo
+            n_D = (n_error - self.prev_error_north) * Kd_velo
+            self.integral_error_north += n_error
+            if self.integral_error_north > I_max:
+                self.integral_error_north = I_max
+            elif self.integral_error_north < -I_max:
+                self.integral_error_north = -I_max
+            n_I = self.integral_error_north * Ki_velo
+            vx = n_P + n_D + n_I
+            if vx > max_velo:
+                vx = max_velo
+            elif vx < -max_velo:
+                vx = -max_velo
+            self.prev_error_north = n_error
+
+            # =========================
+            # EAST PID
+            # =========================
+            e_error = east - curr_pos_e
+            e_P = e_error * Kp_velo
+            e_D = (e_error - self.prev_error_east) * Kd_velo
+            self.integral_error_east += e_error
+            if self.integral_error_east > I_max:
+                self.integral_error_east = I_max
+            elif self.integral_error_east < -I_max:
+                self.integral_error_east = -I_max
+            e_I = self.integral_error_east * Ki_velo
+            vy = e_P + e_D + e_I
+            if vy > max_velo:
+                vy = max_velo
+            elif vy < -max_velo:
+                vy = -max_velo
+            self.prev_error_east = e_error
+
+            # =========================
+            # DOWN PID
+            # =========================
+            d_error = down - curr_pos_d
+            d_P = d_error * Kp_velo
+            d_D = (d_error - self.prev_error_down) * Kd_velo
+            self.integral_error_down += d_error
+            if self.integral_error_down > I_max:
+                self.integral_error_down = I_max
+            elif self.integral_error_down < -I_max:
+                self.integral_error_down = -I_max
+            d_I = self.integral_error_down * Ki_velo
+            vz = d_P + d_D + d_I
+            if vz > max_velo:
+                vz = max_velo
+            elif vz < -max_velo:
+                vz = -max_velo
+            self.prev_error_down = d_error
+
+            # =========================
+            # YAW PID
+            # =========================
+            yaw_error = self._yaw_error(yaw_deg, curr_yaw)
+            yaw_P = yaw_error * Kp_yaw
+            yaw_D = (yaw_error - self.prev_error_yaw) * Kd_yaw
+            self.integral_error_yaw += yaw_error
+            if self.integral_error_yaw > I_max_yaw:
+                self.integral_error_yaw = I_max_yaw
+            elif self.integral_error_yaw < -I_max_yaw:
+                self.integral_error_yaw = -I_max_yaw
+            yaw_I = self.integral_error_yaw * Ki_yaw
+            yaw_output = yaw_P + yaw_D + yaw_I
+            if yaw_output > max_yaw_velo:
+                yaw_output = max_yaw_velo
+            elif yaw_output < -max_yaw_velo:
+                yaw_output = -max_yaw_velo
+            yaw_step = curr_yaw + yaw_output
+            self.prev_error_yaw = yaw_error
+
+            await self.send_velocity(vx,vy,vz,yaw_step)
+            await asyncio.sleep(0.05)
 
     async def send_position_setpoint(self, north, east, down, yaw_deg):
         await self.drone.offboard.set_position_ned(PositionNedYaw(north_m=north, east_m=east, down_m=down, yaw_deg=yaw_deg))
@@ -135,6 +246,34 @@ class Drone:
     async def turn_cw_180(self):
         current = await self.get_yaw()
         await self.rotate_to_yaw(current + 180)
+
+    async def is_position_reached(
+    self,
+    target_north,
+    target_east,
+    target_down,
+    target_yaw, # degrees
+    pos_tolerance=0.1, # degrees
+    yaw_tolerance=5.0, # degrees
+    ):
+        north, east, down = await self.get_position()
+        
+        # Calc euclidean distance
+        distance_error = math.sqrt(
+            (target_north - north) ** 2 +
+            (target_east - east) ** 2 +
+            (target_down - down) ** 2
+        )
+
+        yaw = await self.get_yaw()
+        # Calc yaw error
+        yaw_error = abs(yaw - target_yaw)
+
+        if distance_error < pos_tolerance and yaw_error < yaw_tolerance:
+            print(f"Reached target, error={distance_error:.2f} m")
+            return True
+        else:
+            return False
 
     async def wait_until_position_reached(
     self,
