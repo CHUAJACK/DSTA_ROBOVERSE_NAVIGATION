@@ -16,28 +16,9 @@ def generate_launch_description():
             parameters=[{'use_sim_time': True}],
             arguments=[
                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-             #   '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
+            #    '/depth_camera/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
             ],
             output='screen',
-        ),
-
-        # ── PointCloud Republisher ───────────────────────────────────────────
-        Node(
-            package="depth_to_pointcloud",
-            executable="depth_to_pointcloud_node",
-            name="gz_depth_republisher",
-            output="screen",
-            parameters=[
-                {
-                    "gz_depth": "/depth_camera",
-                    "gz_camera_info":  "/camera_info",
-                    "output_topic":      "/depth_camera_bridged/points",
-                    "null_range_min":      0.95,
-                    "null_range_max":      1.0,
-                    "downsample": 3,
-                    "danger_threshold": 3.0
-                },
-            ],
         ),
 
         # ── Static TFs ───────────────────────────────────────────────────────
@@ -64,13 +45,32 @@ def generate_launch_description():
             ],
         ),
 
-        # ── Point cloud downsampler (stride-2 → 4× fewer points for OctoMap) ─
-        ExecuteProcess(
-            cmd=['bash', '-c',
-                 'source /opt/ros/humble/setup.bash && python3 '
-                 + os.path.join(_DIR, 'pointcloud_downsample.py')],
-            shell=False,
-            output='screen',
+        # # ── Point cloud downsampler (stride-2 → 4× fewer points for OctoMap) ─
+        # ExecuteProcess(
+        #     cmd=['bash', '-c',
+        #          'source /opt/ros/humble/setup.bash && python3 '
+        #          + os.path.join(_DIR, 'pointcloud_downsample.py')],
+        #     shell=False,
+        #     output='screen',
+        # ),
+        # ── Custom PointCloud Republisher ────────────────────────────────────
+
+        Node(
+            package="depth_to_pointcloud",
+            executable="depth_to_pointcloud_node",
+            name="gz_depth_republisher",
+            output="screen",
+            parameters=[
+                {
+                    "gz_depth": "/depth_camera",
+                    "gz_camera_info":  "/camera_info",
+                    "output_topic":      "/depth_camera_bridged/points",
+                    "null_range_min":      0.95,
+                    "null_range_max":      1.0,
+                    "downsample": 3,
+                    "danger_threshold": 3.0
+                },
+            ],
         ),
 
         # ── OctoMap server ───────────────────────────────────────────────────
@@ -81,21 +81,17 @@ def generate_launch_description():
             output='screen',
             remappings=[('cloud_in', '/depth_camera_bridged/points')],
             parameters=[{
-                'resolution': 0.35,  
+                'resolution': 0.35,
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
                 'sensor_model.max_range': 15.0,
                 'transform_tolerance': 1.0,
                 'use_sim_time': True,
-                'ground_filter': True,
-                'occupancy_min_z': 0.8,
+                'occupancy_min_z': 0.3,
                 'occupancy_max_z': 8.0,
-                'sensor_model/hit': 0.95,
-                'sensor_model/miss': 0.3,
-                'latch':False,
-
-
-   
+                'sensor_model/hit': 0.8,
+                'sensor_model/miss': 0.4,
+                'filter_speckles': True,
             }],
         ),
 
@@ -109,7 +105,6 @@ def generate_launch_description():
                 'drone_frame': 'base_link',
                 'world_frame': 'map',
                 'slice_thickness': 0.4,
-                'publish_rate_ms': 50,
                 'publish_rate_ms': 50,
                 'use_sim_time': True,
             }],
