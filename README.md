@@ -122,10 +122,12 @@ W_SIZE     = 0.5      # prefer larger frontier clusters
 W_HEADING  = 0.3      # prefer frontiers ahead of drone
 
 # Velocity controller
-KP_XY        = 0.5   # position P gain — lower if oscillating
-MAX_SPEED    = 1.8   # m/s horizontal
-ARRIVAL_DIST = 0.7   # m — intermediate waypoint reached
-FINAL_DIST   = 1.2   # m — frontier centroid reached
+KP_XY          = 0.6   # position P gain — lower if oscillating
+MAX_SPEED      = 1.4   # m/s horizontal
+APPROACH_SPEED = 1.0   # m/s — speed cap when within APPROACH_DIST of final goal
+APPROACH_DIST  = 3.0   # m — distance from final goal at which speed is capped
+ARRIVAL_DIST   = 0.5   # m — intermediate waypoint reached
+FINAL_DIST     = 1.2   # m — frontier centroid reached
 
 # Yaw sweep
 SWEEP_RATE_DPS   = 40.0  # deg/s rotation speed
@@ -134,14 +136,14 @@ SWEEP_POST_WAIT  = 1.0   # min seconds to wait after sweep for OctoMap
 SWEEP_MAP_FRAMES = 3     # new OctoMap frames to wait for after sweep (adaptive)
 
 # A* / planning
-INFLATION           = 1          # obstacle padding in grid cells (0.35 m per cell)
+INFLATION           = 1                 # obstacle padding in grid cells (0.3 m per cell)
 WALL_COSTS          = [3.0, 1.5, 0.5]  # A* cost penalty at 1/2/3 cells from wall
-MIN_CLUSTER         = 3          # ignore frontier clusters smaller than this
-VISITED_RADIUS      = 0.75       # m — don't revisit frontiers within this radius
-MIN_FRONTIER_DIST_M = 1.5        # ignore frontiers closer than this (camera blind spot)
+MIN_CLUSTER         = 3                 # ignore frontier clusters smaller than this
+VISITED_RADIUS      = 0.75             # m — don't revisit frontiers within this radius
+MIN_FRONTIER_DIST_M = 1.5              # ignore frontiers closer than this (camera blind spot)
 
 # Mid-flight replanning
-REPLAN_INTERVAL_S    = 1.0  # seconds between replan checks during flight
+REPLAN_INTERVAL_S    = 0.4  # seconds between replan checks during flight
 REPLAN_MIN_SAVING_M  = 2.0  # abort path if a closer frontier saves this many metres
 REPLAN_WALL_COST_THR = 2.5  # abort path if a waypoint is this close to a wall
 ```
@@ -157,8 +159,9 @@ OctoMap settings are in `frontier_launch.py`:
 
 ## Autonomous Behaviours
 
-- **Mid-flight replanning**: every second, checks if an obstacle appeared on the path, if the path passes too close to a newly registered wall, or if a significantly closer frontier has appeared — replans immediately if so
-- **Push away from obstacles**: if replanning due to wall proximity, the drone backs away from nearby obstacles before picking a new path
+- **Path commitment**: the drone commits to its A* path and only replans if a waypoint cell becomes directly BLOCKED in the OctoMap, the path passes too close to a newly registered wall, or a significantly closer frontier appears — no replanning on minor map updates
+- **Push away from obstacles**: if replanning due to wall proximity, the drone backs away from immediately adjacent obstacle cells (3×3 neighbourhood) before picking a new path
+- **Blocked frontier handling**: if a frontier triggers two consecutive blocked results, it is skipped and a different frontier is tried; after a brief settle pause on the first block to allow the map to update
 - **Frontier pullback**: if a frontier centroid falls in UNKNOWN space, the navigation goal is pulled 2 cells back toward the robot to avoid flying into unregistered walls
 - **Depth camera blind spot filter**: frontiers closer than 1.5 m are ignored (camera can't map them reliably at close range)
 - **Adaptive post-sweep wait**: waits for a minimum number of new OctoMap frames after each sweep before moving on, so map processing keeps up regardless of map size
@@ -173,6 +176,7 @@ OctoMap settings are in `frontier_launch.py`:
 | Drone lands immediately | Old OctoMap loaded — no frontiers found | Restart Terminal 2 |
 | Battery failsafe / crash | Params reset on PX4 restart | Re-run `param set` commands in `pxh>` |
 | Drone keeps replanning same path | Path near wall, no alternative route | Raise `REPLAN_WALL_COST_THR` or lower `WALL_COSTS` |
+| Drone deviates from path / clips walls | `ARRIVAL_DIST` too loose | Lower to 0.3–0.4 m |
 | Drone oscillates at waypoints | `KP_XY` too high | Lower to 0.3–0.4 |
 | A* skipping all frontiers | Inflation blocking all paths | Lower `INFLATION` to 0 |
 | Gazebo / RViz2 close silently | OOM kill | Resolution and range already tuned to mitigate |

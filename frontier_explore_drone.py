@@ -15,6 +15,7 @@ import asyncio
 import heapq
 import math
 import threading
+import time
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -44,10 +45,12 @@ W_HEADING  = 0.3    # cos(Δangle)  — prefer frontiers ahead of drone
 
 
 # Velocity controller
-KP_XY        = 0.5    # proportional gain (m/s per m error)
-MAX_SPEED    = 1.8    # m/s horizontal
-ARRIVAL_DIST = 0.7   # m — intermediate waypoint reached
-FINAL_DIST   = 1.2   # m — frontier centroid reached
+KP_XY          = 0.6    # proportional gain (m/s per m error)
+MAX_SPEED      = 1.4    # m/s horizontal
+APPROACH_SPEED = 1.0    # m/s — speed cap when within APPROACH_DIST of final goal
+APPROACH_DIST  = 3.0    # m — distance from final goal at which speed is capped
+ARRIVAL_DIST   = 0.5    # m — intermediate waypoint reached
+FINAL_DIST     = 1.2   # m — frontier centroid reached
 
 # 360° yaw sweep
 SWEEP_RATE_DPS  = 40.0    # degrees per second
@@ -61,12 +64,15 @@ VISITED_RADIUS = 0.75  # m — skip re-visiting frontiers within this radius
 
 CONTROL_HZ = 10       # velocity setpoint rate
 
-REPLAN_INTERVAL_S   = 1.0   # seconds between frontier recheck during flight
+REPLAN_INTERVAL_S   = 0.4   # seconds between frontier recheck during flight
 REPLAN_MIN_SAVING_M = 2.0   # abort path if a new frontier is this much closer (metres)
 REPLAN_WALL_COST_THR = 2.5  # replan if a remaining waypoint is this close to a wall (wall cost units)
 
 MIN_FRONTIER_DIST_M = 1.5   # ignore frontiers closer than this (depth camera blind spot)
 SWEEP_MAP_FRAMES    = 3     # wait for this many new map frames after sweep before moving on
+SWEEP_KNOWN_RADIUS_M = 4.0  # skip yaw sweep if no UNKNOWN cells within this radius (m)
+
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,6 +125,25 @@ def nearest_free(grid, r, c, radius=5):
 
 
 WALL_COSTS = [3.0, 1.5, 0.5]   # cost penalty at distance 1, 2, 3 cells from a wall
+
+def surroundings_known(grid, robot_rc, radius_m, resolution):
+    """Return True if every UNKNOWN cell within radius_m is occluded by a wall.
+    UNKNOWN cells that are line-of-sight visible from robot_rc still count as unknown."""
+    r0, c0 = robot_rc
+    r_cells = int(math.ceil(radius_m / resolution))
+    rows, cols = len(grid), len(grid[0])
+    r_sq = r_cells * r_cells
+    for dr in range(-r_cells, r_cells + 1):
+        for dc in range(-r_cells, r_cells + 1):
+            if dr * dr + dc * dc > r_sq:
+                continue
+            nr, nc = r0 + dr, c0 + dc
+            if not (0 <= nr < rows and 0 <= nc < cols):
+                continue
+            if grid[nr][nc] == UNKNOWN and _line_clear(grid, robot_rc, (nr, nc)):
+                return False
+    return True
+
 
 def wall_cost_grid(grid):
     """BFS from all BLOCKED cells outward, assigning proximity penalties."""
@@ -191,7 +216,7 @@ def astar(grid, start, goal, wcosts=None):
                 if not passable(cur[0] + dr, cur[1]) or not passable(cur[0], cur[1] + dc):
                     continue
             wall_pen = wcosts[nb[0]][nb[1]] if wcosts else 0.0
-            ng = g_cur + cost + (3.0 if grid[nb[0]][nb[1]] == UNKNOWN else 0.0) + wall_pen
+            ng = g_cur + cost + (8.0 if grid[nb[0]][nb[1]] == UNKNOWN else 0.0) + wall_pen
             if ng < g_score.get(nb, float('inf')):
                 g_score[nb] = ng
                 came_from[nb] = cur
@@ -236,7 +261,7 @@ def simplify_path(path, grid):
     return result
 
 
-def smooth_path(path, grid, iterations=3):
+def smooth_path(path, grid, iterations=5):
     """Gaussian-style smoothing: nudge each waypoint toward its neighbours
     if the direct line between them remains clear."""
     if len(path) <= 2:
@@ -254,6 +279,32 @@ def smooth_path(path, grid, iterations=3):
                    _line_clear(grid, (nr, nc), (p[i+1][0], p[i+1][1])):
                     p[i] = [nr, nc]
     return [tuple(pt) for pt in p]
+
+
+def smooth_waypoints_ned(waypoints_ne, grid, meta, iterations=12, weight=0.7):
+    """Float-space smoothing on NED waypoints after grid conversion.
+    Avoids grid quantisation — much smoother curves with LOS safety checks."""
+    if len(waypoints_ne) <= 2:
+        return waypoints_ne
+    rows, cols = len(grid), len(grid[0])
+    p = [list(wp) for wp in waypoints_ne]
+    for _ in range(iterations):
+        for i in range(1, len(p) - 1):
+            cn = p[i][0] * (1.0 - weight) + (p[i-1][0] + p[i+1][0]) / 2.0 * weight
+            ce = p[i][1] * (1.0 - weight) + (p[i-1][1] + p[i+1][1]) / 2.0 * weight
+            # Safety: candidate must not land inside a blocked cell
+            pr, pc = world_to_grid(ce, cn, meta)
+            pr = max(0, min(rows - 1, pr))
+            pc = max(0, min(cols - 1, pc))
+            if grid[pr][pc] == BLOCKED:
+                continue
+            # Safety: LOS from both neighbours to candidate (in grid space)
+            r_prev, c_prev = world_to_grid(p[i-1][1], p[i-1][0], meta)
+            r_next, c_next = world_to_grid(p[i+1][1], p[i+1][0], meta)
+            if _line_clear(grid, (r_prev, c_prev), (pr, pc)) and \
+               _line_clear(grid, (pr, pc), (r_next, c_next)):
+                p[i] = [cn, ce]
+    return [tuple(wp) for wp in p]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -355,8 +406,9 @@ class FrontierExplorer:
         self.tel     = tel
         self.map     = map_node
         self.visited = []        # (north, east) of explored frontiers
-        self._astar_fails = {}   # grid_rc -> consecutive failure count
+        self._goal_fails = {}    # grid_rc -> consecutive failure count (A* + follow_path)
         self._skip = set()       # temporarily unreachable frontiers (cleared on success)
+        self._wall_replan_cooldown = 0.0  # persists across follow_path calls
 
     # ── internals ────────────────────────────────────────────────────────────
 
@@ -436,8 +488,8 @@ class FrontierExplorer:
         rr, rc = world_to_grid(ex, ey, meta)
         rows, cols = len(inf_grid), len(inf_grid[0])
         rep_n, rep_e = 0.0, 0.0
-        for dr in range(-2, 3):
-            for dc in range(-2, 3):
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
                 nr, nc = rr + dr, rc + dc
                 if 0 <= nr < rows and 0 <= nc < cols and inf_grid[nr][nc] == BLOCKED:
                     bx, by = grid_to_world(nr, nc, meta)
@@ -469,11 +521,10 @@ class FrontierExplorer:
 
     async def follow_path(self, waypoints_ne, goal_ne):
         """P controller: follow list of (north, east) waypoints.
-        Returns False if a much closer frontier appears mid-flight (triggers replan)."""
+        Returns 'done', 'blocked' (wall/obstacle replan), or 'closer' (closer frontier found)."""
         dt = 1.0 / CONTROL_HZ
         last_replan_check = 0.0
-        wall_replan_cooldown_until = 0.0
-        import time
+        now = 0.0
         goal_n, goal_e = goal_ne
         for i, (wn, we) in enumerate(waypoints_ne):
             tol = FINAL_DIST if i == len(waypoints_ne) - 1 else ARRIVAL_DIST
@@ -489,9 +540,12 @@ class FrontierExplorer:
                 vn = KP_XY * dn
                 ve = KP_XY * de
                 spd = math.hypot(vn, ve)
-                if spd > MAX_SPEED:
-                    vn, ve = vn / spd * MAX_SPEED, ve / spd * MAX_SPEED
+                goal_dist = math.hypot(goal_n - cn, goal_e - ce)
+                speed_limit = APPROACH_SPEED if goal_dist < APPROACH_DIST else MAX_SPEED
                 yaw = math.degrees(math.atan2(de, dn))
+
+                if spd > speed_limit:
+                    vn, ve = vn / spd * speed_limit, ve / spd * speed_limit
                 await self._vel(vn, ve, yaw)
                 await asyncio.sleep(dt)
 
@@ -501,18 +555,26 @@ class FrontierExplorer:
                     grid, meta = self.map.get_map()
                     if grid is not None:
                         inf_grid = inflate_grid(grid, INFLATION)
+                        drone_rc = world_to_grid(ce, cn, meta)
+                        dr, dc = drone_rc
+
+                        rows_g, cols_g = len(inf_grid), len(inf_grid[0])
+                        drone_in_obstacle = (0 <= dr < rows_g and 0 <= dc < cols_g
+                                             and inf_grid[dr][dc] == BLOCKED)
+
                         wcosts_live = wall_cost_grid(inf_grid)
                         remaining = waypoints_ne[i:]
                         replan_reason = None
 
-                        for wn2, we2 in remaining:
-                            pr, pc = world_to_grid(we2, wn2, meta)
-                            if inf_grid[pr][pc] == BLOCKED:
-                                replan_reason = "Obstacle appeared on path"
-                                break
-                            if now > wall_replan_cooldown_until and wcosts_live[pr][pc] >= REPLAN_WALL_COST_THR:
-                                replan_reason = "Path too close to wall"
-                                break
+                        if not drone_in_obstacle:
+                            for wn2, we2 in remaining:
+                                pr, pc = world_to_grid(we2, wn2, meta)
+                                if inf_grid[pr][pc] == BLOCKED:
+                                    replan_reason = "Obstacle appeared on path"
+                                    break
+                                if now > self._wall_replan_cooldown and wcosts_live[pr][pc] >= REPLAN_WALL_COST_THR:
+                                    replan_reason = "Path too close to wall"
+                                    break
 
                         if replan_reason:
                             print(f"[REPLAN] {replan_reason} — stopping and replanning")
@@ -520,8 +582,8 @@ class FrontierExplorer:
                             await asyncio.sleep(0.8)
                             if replan_reason == "Path too close to wall":
                                 await self.push_away_from_obstacles(inf_grid, meta)
-                                wall_replan_cooldown_until = time.monotonic() + 5.0
-                            return False
+                                self._wall_replan_cooldown = time.monotonic() + 5.0
+                            return "blocked"
 
                         # Check if a significantly closer frontier has appeared
                         best_rc, _, _ = self.pick_frontier(grid, meta, skip=self._skip)
@@ -532,10 +594,11 @@ class FrontierExplorer:
                             if goal_dist - best_dist > REPLAN_MIN_SAVING_M:
                                 print(f"[REPLAN] Closer frontier found ({best_dist:.1f}m vs {goal_dist:.1f}m) — stopping and replanning")
                                 await self._vel(0.0, 0.0, self._yaw())
-                                await asyncio.sleep(0.8)   # let drone decelerate before turning
-                                return False
+                                await asyncio.sleep(0.8)
+                                return "closer"
         await self._vel(0.0, 0.0, self._yaw())
-        return True
+        print("[FOLLOW] Path complete — arrived at frontier")
+        return "done"
 
     async def yaw_sweep(self, rotations=1):
         """In-place yaw sweep. rotations=2 for double spin on takeoff."""
@@ -552,10 +615,9 @@ class FrontierExplorer:
         await self._vel(0.0, 0.0, start)
         # Wait for OctoMap to process SWEEP_MAP_FRAMES new frames (adaptive to map size)
         count_before = self.map.get_update_count()
-        import time as _time
-        deadline = _time.monotonic() + SWEEP_POST_WAIT + 5.0   # max wait
+        deadline = time.monotonic() + SWEEP_POST_WAIT + 5.0   # max wait
         while self.map.get_update_count() - count_before < SWEEP_MAP_FRAMES:
-            if _time.monotonic() > deadline:
+            if time.monotonic() > deadline:
                 break
             await asyncio.sleep(0.1)
 
@@ -571,7 +633,6 @@ class FrontierExplorer:
         print("[EXPLORE] Exploration starting")
         await self.yaw_sweep(rotations=2)
 
-        import time
         explore_start = time.monotonic()
         last_heartbeat = explore_start
 
@@ -612,63 +673,41 @@ class FrontierExplorer:
                 await asyncio.sleep(0.2)
                 continue
 
-            # If frontier centroid is in UNKNOWN space, pull goal 2 cells back toward robot
-            # to avoid navigating into unregistered walls at the frontier boundary
-            gr, gc = snapped
-            if grid[goal_rc[0]][goal_rc[1]] == UNKNOWN:
-                rr, rc2 = robot_snapped
-                dr = rr - gr; dc = rc2 - gc
-                length = math.hypot(dr, dc)
-                if length > 2:
-                    pr = int(round(gr + 2 * dr / length))
-                    pc = int(round(gc + 2 * dc / length))
-                    rows_g, cols_g = len(inf_grid), len(inf_grid[0])
-                    pr = max(0, min(rows_g - 1, pr))
-                    pc = max(0, min(cols_g - 1, pc))
-                    if inf_grid[pr][pc] != BLOCKED:
-                        snapped = (pr, pc)
-
             # Pull goal 2 cells back toward robot to avoid navigating into unregistered walls
             gr, gc = snapped
             rr, rc2 = robot_snapped
-            dr = rr - gr; dc = rc2 - gc
+            dr, dc = rr - gr, rc2 - gc
             length = math.hypot(dr, dc)
             if length > 2:
-                pr = int(round(gr + 2 * dr / length))
-                pc = int(round(gc + 2 * dc / length))
-                rows, cols = len(inf_grid), len(inf_grid[0])
-                pr = max(0, min(rows - 1, pr))
-                pc = max(0, min(cols - 1, pc))
+                rows_g, cols_g = len(inf_grid), len(inf_grid[0])
+                pr = max(0, min(rows_g - 1, int(round(gr + 2 * dr / length))))
+                pc = max(0, min(cols_g - 1, int(round(gc + 2 * dc / length))))
                 if inf_grid[pr][pc] != BLOCKED:
                     snapped = (pr, pc)
 
             path_rc = astar(inf_grid, robot_snapped, snapped, wcosts=wcosts)
 
             if path_rc is None:
-                fails = self._astar_fails.get(goal_rc, 0) + 1
-                self._astar_fails[goal_rc] = fails
+                fails = self._goal_fails.get(goal_rc, 0) + 1
+                self._goal_fails[goal_rc] = fails
                 print(f"[EXPLORE] No A* path to {goal_rc} — attempt {fails}, trying next frontier")
-                if fails >= 3:
+                if fails >= 4:
                     self._skip.add(goal_rc)
-                    del self._astar_fails[goal_rc]
+                    self._goal_fails.pop(goal_rc, None)
                     print(f"[EXPLORE] {goal_rc} temporarily skipped — will retry after a success")
                 await asyncio.sleep(0.2)
                 continue
 
-            # Successful path — clear skip list so temporarily blocked frontiers can be retried
-            self._astar_fails.pop(goal_rc, None)
-            self._skip.discard(goal_rc)
+            # Successful path — reset failures and clear skip list
+            self._goal_fails.pop(goal_rc, None)
             if self._skip:
                 self._skip.clear()
                 print("[EXPLORE] Path found — resetting skipped frontiers")
 
-            simplified = smooth_path(simplify_path(path_rc, inf_grid), inf_grid)
-
-            # Convert to NED waypoints
-            waypoints_ne = []
-            for r, c in simplified:
-                ex, ey = grid_to_world(r, c, meta)
-                waypoints_ne.append((ey, ex))   # (north, east)
+            # Simplify path (LOS shortcutting), then smooth in continuous NED space
+            waypoints_ne = [(grid_to_world(r, c, meta)[1], grid_to_world(r, c, meta)[0])
+                            for r, c in simplify_path(path_rc, inf_grid)]
+            waypoints_ne = smooth_waypoints_ned(waypoints_ne, inf_grid, meta)
 
             self.map.publish_path(waypoints_ne)
             print(f"[EXPLORE] → {goal_rc}  ({len(waypoints_ne)} waypoints)")
@@ -676,11 +715,28 @@ class FrontierExplorer:
             gx, gy = grid_to_world(*goal_rc, meta)
             goal_ne = (gy, gx)   # (north, east)
 
-            completed = await self.follow_path(waypoints_ne, goal_ne)
-            if not completed:
-                continue   # replan immediately without sweep or marking visited
+            result = await self.follow_path(waypoints_ne, goal_ne)
+            if result == "closer":
+                # Deprioritize the abandoned goal so we don't immediately snap back to it
+                self._skip.add(goal_rc)
+                print(f"[EXPLORE] {goal_rc} deprioritised — exploring closer frontier first")
+                continue
+            if result == "blocked":
+                fails = self._goal_fails.get(goal_rc, 0) + 1
+                self._goal_fails[goal_rc] = fails
+                if fails >= 2:
+                    self._skip.add(goal_rc)
+                    self._goal_fails.pop(goal_rc, None)
+                    print(f"[EXPLORE] {goal_rc} skipped after {fails} blocked attempts — trying different frontier")
+                else:
+                    print(f"[EXPLORE] {goal_rc} blocked (attempt {fails}/2) — retrying after settle")
+                    await asyncio.sleep(1.0)  # let map update + drone settle before retry
+                continue
 
-            await self.yaw_sweep()
+            if surroundings_known(grid, robot_rc, SWEEP_KNOWN_RADIUS_M, meta.resolution):
+                print(f"[EXPLORE] Surroundings already mapped (r={SWEEP_KNOWN_RADIUS_M}m) — skipping sweep")
+            else:
+                await self.yaw_sweep()
             self.visited.append((gy, gx))
             print(f"[EXPLORE] Frontier done ({len(self.visited)} visited)")
             await asyncio.sleep(0.2)
