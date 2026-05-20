@@ -27,6 +27,7 @@ sudo apt install ros-humble-octomap ros-humble-octomap-msgs \
 
 # Python
 pip install mavsdk
+pip install numpy
 ```
 
 ---
@@ -90,13 +91,14 @@ python3 frontier_explore_drone.py
 The drone will:
 1. Connect to PX4 via MAVSDK
 2. Arm and take off to 2.5 m
-3. Do a **double 360° sweep** to seed the initial map
-4. Score and select the best frontier (distance + size + heading)
-5. Plan an A* path with wall-proximity cost gradient
-6. Follow the path, replanning every second if obstacles appear or a closer frontier is found
-7. Do a 360° yaw sweep at the frontier, waiting for OctoMap to catch up
-8. Repeat until no frontiers remain, then land
-9. Print total exploration time on completion
+3. Wait for OctoMap pipeline health check (10 frames)
+4. Do a **double 360° sweep** to seed the initial map
+5. Score and select the best frontier (distance + size + heading)
+6. Plan an A* path with wall-proximity cost gradient, densified and smoothed
+7. Follow the path, replanning only if a waypoint becomes BLOCKED or a much closer frontier appears
+8. Do a 360° yaw sweep at the frontier, waiting for OctoMap to catch up
+9. Repeat until no frontiers remain, then land
+10. Print total exploration time on completion
 
 ---
 
@@ -122,11 +124,11 @@ W_SIZE     = 0.5      # prefer larger frontier clusters
 W_HEADING  = 0.3      # prefer frontiers ahead of drone
 
 # Velocity controller
-KP_XY          = 0.6   # position P gain — lower if oscillating
-MAX_SPEED      = 1.4   # m/s horizontal
+KP_XY          = 0.8   # position P gain — lower if oscillating
+MAX_SPEED      = 1.6   # m/s horizontal
 APPROACH_SPEED = 1.0   # m/s — speed cap when within APPROACH_DIST of final goal
 APPROACH_DIST  = 3.0   # m — distance from final goal at which speed is capped
-ARRIVAL_DIST   = 0.5   # m — intermediate waypoint reached
+ARRIVAL_DIST   = 1.0   # m — intermediate waypoint reached
 FINAL_DIST     = 1.2   # m — frontier centroid reached
 
 # Yaw sweep
@@ -136,36 +138,41 @@ SWEEP_POST_WAIT  = 1.0   # min seconds to wait after sweep for OctoMap
 SWEEP_MAP_FRAMES = 3     # new OctoMap frames to wait for after sweep (adaptive)
 
 # A* / planning
-INFLATION           = 1                 # obstacle padding in grid cells (0.3 m per cell)
-WALL_COSTS          = [3.0, 1.5, 0.5]  # A* cost penalty at 1/2/3 cells from wall
-MIN_CLUSTER         = 3                 # ignore frontier clusters smaller than this
-VISITED_RADIUS      = 0.75             # m — don't revisit frontiers within this radius
-MIN_FRONTIER_DIST_M = 1.5              # ignore frontiers closer than this (camera blind spot)
+INFLATION           = 2                       # obstacle padding in grid cells (0.3 m per cell)
+WALL_COSTS          = [3.0, 3.0, 1.5, 0.5]  # A* cost penalty at 1/2/3/4 cells from wall
+MIN_CLUSTER         = 3                       # ignore frontier clusters smaller than this
+VISITED_RADIUS      = 0.75                   # m — don't revisit frontiers within this radius
+MIN_FRONTIER_DIST_M = 1.5                    # ignore frontiers closer than this
 
 # Mid-flight replanning
-REPLAN_INTERVAL_S    = 0.4  # seconds between replan checks during flight
-REPLAN_MIN_SAVING_M  = 2.0  # abort path if a closer frontier saves this many metres
-REPLAN_WALL_COST_THR = 2.5  # abort path if a waypoint is this close to a wall
+REPLAN_INTERVAL_S    = 0.2   # seconds between replan checks during flight
+REPLAN_MIN_SAVING_M  = 3.0   # abort path if a closer frontier saves this many metres
+REPLAN_WALL_COST_THR = 3.5   # effectively disabled — inflation already guarantees wall clearance
 ```
 
 OctoMap settings are in `frontier_launch.py`:
 
 ```python
-'resolution': 0.35,             # m per voxel
-'sensor_model.max_range': 10.0  # m
+'resolution': 0.35,              # m per voxel
+'sensor_model.max_range': 15.0,  # m
+'sensor_model/hit':  0.8,        # occupied update probability
+'sensor_model/miss': 0.4,        # free-space update probability
+'transform_tolerance': 1.0,      # TF timing headroom (seconds)
 ```
 
 ---
 
 ## Autonomous Behaviours
 
-- **Path commitment**: the drone commits to its A* path and only replans if a waypoint cell becomes directly BLOCKED in the OctoMap, the path passes too close to a newly registered wall, or a significantly closer frontier appears — no replanning on minor map updates
+- **OctoMap health check**: waits for 10 consecutive map frames before starting — catches TF timing failures at startup before the drone moves
+- **Path commitment**: the drone commits to its A* path and only replans if a waypoint cell becomes directly BLOCKED within 5 m, or a frontier at least 3 m closer appears — no replanning on minor map updates
+- **Path densification + smoothing**: A* waypoints are densified at 1 m intervals then gradient-smoothed for curved, wall-avoiding flight paths
+- **Unknown cell padding**: the occupancy grid is wrapped in a 1-cell UNKNOWN border so WFD always finds frontier cells at the map edges
 - **Push away from obstacles**: if replanning due to wall proximity, the drone backs away from immediately adjacent obstacle cells (3×3 neighbourhood) before picking a new path
-- **Blocked frontier handling**: if a frontier triggers two consecutive blocked results, it is skipped and a different frontier is tried; after a brief settle pause on the first block to allow the map to update
-- **Frontier pullback**: if a frontier centroid falls in UNKNOWN space, the navigation goal is pulled 2 cells back toward the robot to avoid flying into unregistered walls
-- **Depth camera blind spot filter**: frontiers closer than 1.5 m are ignored (camera can't map them reliably at close range)
-- **Adaptive post-sweep wait**: waits for a minimum number of new OctoMap frames after each sweep before moving on, so map processing keeps up regardless of map size
-- **Unreachable frontier handling**: after 3 failed A* attempts, a frontier is temporarily skipped; cleared automatically when any path succeeds
+- **Blocked frontier handling**: if a frontier triggers two consecutive blocked results, it is skipped; skip list clears only on actual arrival at a frontier
+- **Frontier pullback**: navigation goal is pulled 2 cells back toward the robot to avoid flying into unregistered walls at frontier edges
+- **Adaptive post-sweep wait**: waits for a minimum number of new OctoMap frames after each sweep before moving on
+- **Point cloud downsampling**: `pointcloud_downsample.py` applies stride-2 downsampling (4× fewer points) before OctoMap ingestion, reducing processing lag without affecting map quality
 
 ---
 
@@ -175,9 +182,12 @@ OctoMap settings are in `frontier_launch.py`:
 |---------|-------|-----|
 | Drone lands immediately | Old OctoMap loaded — no frontiers found | Restart Terminal 2 |
 | Battery failsafe / crash | Params reset on PX4 restart | Re-run `param set` commands in `pxh>` |
-| Drone keeps replanning same path | Path near wall, no alternative route | Raise `REPLAN_WALL_COST_THR` or lower `WALL_COSTS` |
-| Drone deviates from path / clips walls | `ARRIVAL_DIST` too loose | Lower to 0.3–0.4 m |
-| Drone oscillates at waypoints | `KP_XY` too high | Lower to 0.3–0.4 |
-| A* skipping all frontiers | Inflation blocking all paths | Lower `INFLATION` to 0 |
-| Gazebo / RViz2 close silently | OOM kill | Resolution and range already tuned to mitigate |
+| OctoMap not rendering | TF timing mismatch at startup | Watch for `[EXPLORE] WARNING: only N/10 frames` — restart Terminal 2 |
+| Ghost points not clearing | `sensor_model/hit` too high | Lower toward 0.7 |
+| Drone keeps replanning same path | Path near wall, no alternative route | Frontier will be skipped after 2 blocked attempts automatically |
+| Drone deviates from path / clips walls | `ARRIVAL_DIST` too loose | Lower to 0.5–0.7 m |
+| Drone oscillates at waypoints | `KP_XY` too high | Lower to 0.5–0.6 |
+| A* skipping all frontiers | Inflation blocking all paths | Lower `INFLATION` to 1 |
+| Gazebo / RViz2 close silently | OOM kill | Lower `sensor_model.max_range` or increase `STRIDE` in `pointcloud_downsample.py` |
+| `/depth_camera/points_filtered` not publishing | Downsampler crashed | Check Terminal 2 output; ROS 2 must be sourced |
 | `[EXPLORE] Still exploring` every minute | Normal heartbeat | Not an error |

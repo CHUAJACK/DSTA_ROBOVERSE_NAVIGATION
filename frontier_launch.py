@@ -1,4 +1,5 @@
 from launch import LaunchDescription
+from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 import os
 
@@ -44,24 +45,33 @@ def generate_launch_description():
             ],
         ),
 
+        # ── Point cloud downsampler (stride-2 → 4× fewer points for OctoMap) ─
+        ExecuteProcess(
+            cmd=['bash', '-c',
+                 'source /opt/ros/humble/setup.bash && python3 '
+                 + os.path.join(_DIR, 'pointcloud_downsample.py')],
+            shell=False,
+            output='screen',
+        ),
+
         # ── OctoMap server ───────────────────────────────────────────────────
         Node(
             package='octomap_server',
             executable='octomap_server_node',
             name='octomap_server',
             output='screen',
-            remappings=[('cloud_in', '/depth_camera/points')],
+            remappings=[('cloud_in', '/depth_camera/points_filtered')],
             parameters=[{
                 'resolution': 0.35,
                 'frame_id': 'map',
                 'base_frame_id': 'base_link',
-                'sensor_model.max_range': 10.0,
-                'transform_tolerance': 0.5,
+                'sensor_model.max_range': 15.0,
+                'transform_tolerance': 1.0,
                 'use_sim_time': True,
                 'occupancy_min_z': 0.3,
                 'occupancy_max_z': 8.0,
-                'sensor_model/hit': 0.95,
-                'sensor_model/miss': 0.3,
+                'sensor_model/hit': 0.8,
+                'sensor_model/miss': 0.4,
                 'filter_speckles': True,
             }],
         ),
