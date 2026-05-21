@@ -256,7 +256,7 @@ class PathFollower(Node):
             )
 
             # Use your Drone wrapper movement function
-            await self.drone.custom_position_setpoint(
+            await self.drone.send_position_setpoint(
                 north=north,
                 east=east,
                 down=down,

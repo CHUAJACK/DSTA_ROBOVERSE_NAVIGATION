@@ -708,6 +708,47 @@ class OctomapToNumpyGrid(Node):
             throttle_duration_sec=1.0
         )
 
+    def get_frontier_cluster_infos(self, min_cluster_size=5):
+        """
+        Groups frontier cells into 3D connected components.
+
+        Returns a list of dictionaries:
+            {
+                "center_ned": np.array([north, east, down]),
+                "center_grid": np.array([ix, iy, iz]),
+                "size": number of frontier cells in cluster
+            }
+        """
+
+        structure = generate_binary_structure(rank=3, connectivity=1)
+        labelled, num_features = label(self.frontier_grid, structure=structure)
+
+        cluster_infos = []
+
+        for cluster_id in range(1, num_features + 1):
+            indices = np.argwhere(labelled == cluster_id)
+
+            cluster_size = indices.shape[0]
+
+            if cluster_size < min_cluster_size:
+                continue
+
+            centre_index = np.mean(indices, axis=0)
+
+            ix, iy, iz = centre_index
+            x, y, z = self.grid_to_world(ix, iy, iz)
+
+            east = x
+            north = y
+            down = -z
+
+            cluster_infos.append({
+                "center_ned": np.array([north, east, down], dtype=np.float32),
+                "center_grid": np.array([ix, iy, iz], dtype=np.float32),
+                "size": int(cluster_size),
+            })
+
+        return cluster_infos
 
 async def ros_spin_task(node):
     while rclpy.ok():
