@@ -19,6 +19,8 @@ class Drone:
         self.prev_error_yaw = 0.0
         self.integral_error_yaw = 0.0
 
+        self.last_time = None
+
     def _normalize_yaw(self, yaw_deg):
         while yaw_deg > 180:
             yaw_deg -= 360
@@ -66,18 +68,44 @@ class Drone:
     async def get_yaw(self):
         async for att in self.drone.telemetry.attitude_euler():
             return att.yaw_deg
+        
+    async def get_velo(self):
+        async for velo in self.drone.telemetry.position_velocity_ned():
+            return velo.velocity.north_m_s, velo.velocity.east_m_s, velo.velocity.down_m_s
 
     async def send_velocity(self, vx, vy, vz,yaw_deg):
          await self.drone.offboard.set_velocity_ned(VelocityNedYaw(north_m_s=vx, east_m_s=vy, down_m_s=vz, yaw_deg=yaw_deg))
 
+    def reset_position_pid(self):
+        self.prev_error_north = 0.0
+        self.prev_error_east = 0.0
+        self.prev_error_down = 0.0
+        self.prev_error_yaw = 0.0
+
+        self.integral_error_north = 0.0
+        self.integral_error_east = 0.0
+        self.integral_error_down = 0.0
+        self.integral_error_yaw = 0.0
+
+        self.last_time = None
+
     async def custom_position_setpoint(self, north, east, down, yaw_deg):
+        # Reset PID memory between setpoints
+        self.reset_position_pid()
         # PID constants
-        Kp_velo = 2.0
+        Kp_velo = 2.5
         Ki_velo = 0.0
-        Kd_velo = 6.0
+        Kd_velo = 1.9
 
         I_max = 0.0
-        max_velo = 10
+        max_velo = 20
+
+        Kp_down = 3.0
+        Ki_down = 1.0
+        Kd_down = 1.5
+
+        I_max_down = 2.0
+        max_down_velo = 10
 
         Kp_yaw = 2.0
         Ki_yaw = 0.0
@@ -89,13 +117,14 @@ class Drone:
         while not await self.is_position_reached(north, east, down, yaw_deg):
             curr_pos_n, curr_pos_e, curr_pos_d = await self.get_position()
             curr_yaw = await self.get_yaw()
+            curr_velo_n, curr_velo_e, curr_velo_d = await self.get_velo()
 
             # =========================
             # NORTH PID
             # =========================
             n_error = north - curr_pos_n
             n_P = n_error * Kp_velo
-            n_D = (n_error - self.prev_error_north) * Kd_velo
+            n_D = -curr_velo_n * Kd_velo
             self.integral_error_north += n_error
             if self.integral_error_north > I_max:
                 self.integral_error_north = I_max
@@ -114,7 +143,7 @@ class Drone:
             # =========================
             e_error = east - curr_pos_e
             e_P = e_error * Kp_velo
-            e_D = (e_error - self.prev_error_east) * Kd_velo
+            e_D = -curr_velo_e * Kd_velo
             self.integral_error_east += e_error
             if self.integral_error_east > I_max:
                 self.integral_error_east = I_max
@@ -132,19 +161,19 @@ class Drone:
             # DOWN PID
             # =========================
             d_error = down - curr_pos_d
-            d_P = d_error * Kp_velo
-            d_D = (d_error - self.prev_error_down) * Kd_velo
+            d_P = d_error * Kp_down
+            d_D = -curr_velo_d * Kd_down
             self.integral_error_down += d_error
-            if self.integral_error_down > I_max:
-                self.integral_error_down = I_max
-            elif self.integral_error_down < -I_max:
-                self.integral_error_down = -I_max
-            d_I = self.integral_error_down * Ki_velo
+            if self.integral_error_down > I_max_down:
+                self.integral_error_down = I_max_down
+            elif self.integral_error_down < -I_max_down:
+                self.integral_error_down = -I_max_down
+            d_I = self.integral_error_down * Ki_down
             vz = d_P + d_D + d_I
-            if vz > max_velo:
-                vz = max_velo
-            elif vz < -max_velo:
-                vz = -max_velo
+            if vz > max_down_velo:
+                vz = max_down_velo
+            elif vz < -max_down_velo:
+                vz = -max_down_velo
             self.prev_error_down = d_error
 
             # =========================
@@ -164,7 +193,7 @@ class Drone:
                 yaw_output = max_yaw_velo
             elif yaw_output < -max_yaw_velo:
                 yaw_output = -max_yaw_velo
-            yaw_step = curr_yaw + yaw_output
+            yaw_step = self._normalize_yaw(curr_yaw + yaw_output)
             self.prev_error_yaw = yaw_error
 
             await self.send_velocity(vx,vy,vz,yaw_step)
@@ -253,8 +282,8 @@ class Drone:
     target_east,
     target_down,
     target_yaw, # degrees
-    pos_tolerance=0.1, # degrees
-    yaw_tolerance=5.0, # degrees
+    pos_tolerance=0.15, # degrees
+    yaw_tolerance=10.0, # degrees
     ):
         north, east, down = await self.get_position()
         
