@@ -37,7 +37,7 @@ from frontier_detector import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MAVSDK_ADDRESS  = "udp://:14540"
-TAKEOFF_ALT_M   = 3.2          # metres AGL
+TAKEOFF_ALT_M   = 3.0         # metres AGL
 
 # Frontier scoring weights (set any weight to 0 to disable that term)
 W_DISTANCE = 2.0    
@@ -55,7 +55,7 @@ ARRIVAL_DIST   = 1.0    # m — intermediate waypoint reached
 FINAL_DIST     = 1.2   # m — frontier centroid reached
 
 # 360° yaw sweep
-SWEEP_RATE_DPS  = 90.0    # degrees per second
+SWEEP_RATE_DPS  = 120.0    # degrees per second
 SWEEP_TOTAL_DEG = 360.0
 SWEEP_POST_WAIT = 1.0     # seconds to wait after sweep for OctoMap to catch up
 
@@ -648,6 +648,10 @@ class FrontierExplorer:
     # ── main loop ─────────────────────────────────────────────────────────────
 
     async def run(self):
+        print("[INIT] taking off")
+        await self.drone.action.set_takeoff_altitude(TAKEOFF_ALT_M)
+        await arm_and_takeoff(self.drone)
+        await start_offboard(self.drone)
         print("[EXPLORE] Waiting for map + position...")
         while True:
             grid, meta = self.map.get_map()
@@ -847,9 +851,9 @@ async def main():
     ros_thread.start()
 
 
-    await drone.action.set_takeoff_altitude(TAKEOFF_ALT_M)
-    await arm_and_takeoff(drone)
-    await start_offboard(drone)
+    # await drone.action.set_takeoff_altitude(TAKEOFF_ALT_M)
+    # await arm_and_takeoff(drone)
+    # await start_offboard(drone)  
 
     explorer = FrontierExplorer(drone, telemetry, map_node)
 
