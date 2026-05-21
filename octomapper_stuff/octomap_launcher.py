@@ -77,9 +77,7 @@ async def main():
         # 3. Start MAVSDK dynamic TF broadcaster
         tf_cmd = [
             "python3",
-            str(BASE_DIR / "mavsdk_camera_tf_broadcaster.py"),
-            "--child-frame",
-            CAMERA_FRAME,
+            str(BASE_DIR / "mavsdk_body_camera_tf_broadcaster.py"),
         ]
 
         tf = await start_process("tf_broadcaster", tf_cmd)
@@ -95,6 +93,7 @@ async def main():
             "-p", "frame_id:=map",
             "-p", f"resolution:={RESOLUTION}",
             "-p", "use_sim_time:=true",
+            "-p", "publish_free_space:=true",
         ]
 
         octomap = await start_process("octomap_server", octomap_cmd)
@@ -103,8 +102,11 @@ async def main():
         await asyncio.sleep(2.0)
 
         # 5. Optional RViz2 with sim time enabled
+        rviz_config = BASE_DIR / "octomap_frontier.rviz"
+
         rviz_cmd = [
             "rviz2",
+            "-d", str(rviz_config),
             "--ros-args",
             "-p", "use_sim_time:=true",
         ]
