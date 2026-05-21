@@ -37,7 +37,7 @@ from frontier_detector import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 MAVSDK_ADDRESS  = "udp://:14540"
-TAKEOFF_ALT_M   = 3.0         # metres AGL
+TAKEOFF_ALT_M   = 3.2         # metres AGL
 
 # Frontier scoring weights (set any weight to 0 to disable that term)
 W_DISTANCE = 2.0    
@@ -48,7 +48,7 @@ W_HEADING  = 0.3    # cos(Δangle)  — prefer frontiers ahead of drone
 
 # Velocity controller
 KP_XY          = 1.0    # proportional gain (m/s per m error)
-MAX_SPEED      = 3.0    # m/s horizontal
+MAX_SPEED      = 3.5    # m/s horizontal
 APPROACH_SPEED = 1.0    # m/s — speed cap when within APPROACH_DIST of final goal
 APPROACH_DIST  = 3.0    # m — distance from final goal at which speed is capped
 ARRIVAL_DIST   = 1.0    # m — intermediate waypoint reached

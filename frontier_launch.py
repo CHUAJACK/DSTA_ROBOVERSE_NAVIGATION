@@ -37,25 +37,6 @@ def generate_launch_description():
             ],
         ),
 
-        # ── PointCloud Republisher ───────────────────────────────────────────
-        Node(
-            package="depth_to_pointcloud",
-            executable="depth_to_pointcloud_node",
-            name="gz_depth_republisher",
-            output="screen",
-            parameters=[
-                {
-                    "gz_depth": "/depth_camera",
-                    "gz_camera_info":  "/camera_info",
-                    "output_topic":      "/depth_camera_bridged/points",
-                    "null_range_min":      0.95,
-                    "null_range_max":      1.0,
-                    "downsample": 3,
-                    "danger_threshold": 3.0
-                },
-            ],
-        ),
-
         # ── Static TFs ───────────────────────────────────────────────────────
         Node(
             package='tf2_ros',
