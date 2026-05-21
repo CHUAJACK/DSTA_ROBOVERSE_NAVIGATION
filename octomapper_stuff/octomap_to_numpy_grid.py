@@ -531,7 +531,7 @@ class OctomapToNumpyGrid(Node):
         marker_array.markers.append(marker)
         self.frontier_pub.publish(marker_array)
 
-    def publish_frontier_clusters(self, min_cluster_size=5):
+    def publish_frontier_clusters(self, min_cluster_size=20):
         """
         Publish frontier cluster centres as blue sphere markers in RViz.
         """
@@ -659,7 +659,7 @@ class OctomapToNumpyGrid(Node):
 
         return np.column_stack([north, east, down]).astype(np.float32)
 
-    def get_frontier_clusters(self, min_cluster_size=5):
+    def get_frontier_clusters(self, min_cluster_size=20):
         """
         Groups frontier cells into 3D connected components.
 
@@ -715,7 +715,7 @@ async def ros_spin_task(node):
 
         # Publish RViz visualisations
         node.publish_frontiers(max_frontier_cells=5000)
-        node.publish_frontier_clusters(min_cluster_size=5)
+        node.publish_frontier_clusters(min_cluster_size=20)
 
         node.print_summary()
 

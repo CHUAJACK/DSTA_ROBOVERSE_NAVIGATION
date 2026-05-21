@@ -29,7 +29,7 @@ class FastDepthToPointCloud(Node):
         cy=240.0,
         stride=8,
         min_depth=0.3,
-        max_depth=5.0,
+        max_depth=10.0,
         publish_rate_hz=5.0,
     ):
         super().__init__("fast_depth_to_pointcloud")
@@ -194,7 +194,7 @@ async def main():
         frame_id="camera_link",
         stride=8,
         min_depth=0.3,
-        max_depth=5.0,
+        max_depth=10.0,
         publish_rate_hz=5.0,
     )
 

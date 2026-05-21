@@ -7,7 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent
 
 POINTCLOUD_TOPIC = "/depth_camera/points_fast"
 CAMERA_FRAME = "camera_link"
-RESOLUTION = "0.2"
+RESOLUTION = "0.5"
 
 
 async def start_process(name, cmd):

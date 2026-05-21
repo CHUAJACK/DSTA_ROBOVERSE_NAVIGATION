@@ -93,10 +93,7 @@ class FrontierPathfinder(Node):
 
     def build_frontier_priority_queue(self, drone_ned):
         """
-        Priority queue of frontier clusters, nearest first.
-
-        Returns:
-            heap of (distance, index, frontier_ned)
+        Priority queue of frontier clusters, furthest first.
         """
 
         clusters = self.grid_node.get_frontier_clusters(
@@ -107,7 +104,10 @@ class FrontierPathfinder(Node):
 
         for i, frontier_ned in enumerate(clusters):
             dist = self.distance_ned(drone_ned, frontier_ned)
-            heapq.heappush(heap, (dist, i, frontier_ned))
+
+            # heapq is a min-heap, so use negative distance
+            # to make the furthest frontier come out first.
+            heapq.heappush(heap, (-dist, i, frontier_ned))
 
         return heap
 
@@ -209,7 +209,8 @@ class FrontierPathfinder(Node):
         attempts = 0
 
         while heap and attempts < max_attempts:
-            dist, _, frontier_ned = heapq.heappop(heap)
+            neg_dist, _, frontier_ned = heapq.heappop(heap)
+            dist = -neg_dist
             attempts += 1
 
             self.get_logger().info(
