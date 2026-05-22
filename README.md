@@ -13,6 +13,11 @@ Autonomous drone exploration using PX4 SITL + Gazebo + ROS 2 Humble. The drone b
 | CV model | yolo8n |
 | Drone model | `x500_vision`, world: `roboverse` |
 
+Mapping Pipeline: Gazebo outputs depth image 
+-> PointCloudRangeFilter outputs depthcloud
+-> Octomapper builds Octree using depthcloud
+-> octomap_2d_slicer generates 2d map at drone's altitude
+-> frontier_explorer_drone.py does frontier detection and navigation
 ---
 
 ## Dependencies
