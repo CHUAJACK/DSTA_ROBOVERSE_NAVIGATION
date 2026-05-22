@@ -1,6 +1,6 @@
 # Frontier Exploration Drone
 
-Autonomous drone exploration using PX4 SITL + Gazebo + ROS 2 Humble. The drone builds a live 3D OctoMap, slices it to a 2D occupancy grid, and uses Wavefront Frontier Detection + A* to navigate unexplored space.
+Autonomous drone exploration using PX4 SITL + Gazebo + ROS 2 Humble. The drone builds a live 3D OctoMap, slices it to a 2D occupancy grid, and uses Wavefront Frontier Detection + A* to navigate unexplored space. The frontier selection is an weighted formula that balances between distance, size and angle to direction the drone is heading.
 
 ## Stack
 
@@ -10,6 +10,7 @@ Autonomous drone exploration using PX4 SITL + Gazebo + ROS 2 Humble. The drone b
 | Flight control | MAVSDK Python |
 | Mapping | OctoMap server + custom 2D slicer |
 | ROS 2 | Humble |
+| CV model | yolo8n |
 | Drone model | `x500_vision`, world: `roboverse` |
 
 ---
@@ -27,7 +28,10 @@ sudo apt install ros-humble-octomap ros-humble-octomap-msgs \
 
 # Python
 pip install mavsdk
-pip install numpy
+pip install "numpy==1.26.4"
+
+# Yolo
+pip install ultralytics
 ```
 
 ---
@@ -56,8 +60,8 @@ colcon build
 
 ```bash
 cd ~/
-bash start_px4.sh
-# Select: x500_vision, roboverse, No QGC
+./start_px4.sh
+# Select: x500_vision, roboverse, QGC
 # Wait ~30s for Gazebo and PX4 to fully load
 ```
 
@@ -65,29 +69,33 @@ Once loaded, run these in the `pxh>` MAVLink shell — **required every fresh PX
 
 ```
 commander set_ekf_origin 47.397742 8.545594 488.0
-param set COM_LOW_BAT_ACT 0
-param set SIM_BAT_DRAIN 0
 ```
 
-Wait ~10s for EKF to stabilise (`home set` confirms it).
+Wait for `Drone Ready for Takeoff` to confirm drone ready.
 
-### Terminal 2 — Mapping Stack + RViz2
+### Terminal 2 — Navigation + Mapping
 
 ```bash
+cd ~/DSTA_ROBOVERSE_NAVIGATION
 source /opt/ros/humble/setup.bash
-cd ~/octomapper
-source install/setup.bash
 ros2 launch frontier_launch.py
 ```
 
-Wait for RViz2 to open. **Restart this terminal between runs** to clear the old OctoMap.
-
-### Terminal 3 — Frontier Exploration
+### Terminal 3 — Run CV detection code
 
 ```bash
+cd ~/DSTA_ROBOVERSE_NAVIGATION
+source .venv/bin/activate
+python3 can_detector_gps.py
+```
+
+### Terminal 4 — Frontier Detection and Mapping
+
+```bash
+cd ~/DSTA_ROBOVERSE_NAVIGATION/cv
 source /opt/ros/humble/setup.bash
-cd ~/octomapper
-python3 frontier_explore_drone.py
+source venv/bin/activate
+python3 frontier_explore_drone.py 
 ```
 
 The drone will:
