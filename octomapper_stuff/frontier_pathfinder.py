@@ -86,8 +86,9 @@ class FrontierPathfinder(Node):
     def build_frontier_priority_queue(
         self,
         drone_ned,
-        min_cluster_size=10,
+        min_cluster_size=50,
         information_gain_weight=0.05,
+        min_frontier_distance=0.5,
     ):
         """
         Build priority queue of frontier clusters.
@@ -115,6 +116,11 @@ class FrontierPathfinder(Node):
             cluster_size = info["size"]
 
             distance = self.distance_ned(drone_ned, frontier_ned)
+
+            if distance < min_frontier_distance:
+                continue
+
+            distance = self.distance_ned(drone_ned, frontier_ned)
             score = distance - information_gain_weight * cluster_size
 
             heapq.heappush(
@@ -134,6 +140,79 @@ class FrontierPathfinder(Node):
     # =========================================================
     # Pathfinding3D
     # =========================================================
+
+    def get_furthest_known_free_target(
+        self,
+        drone_ned,
+        min_distance=2.0,
+        max_candidates=500,
+    ):
+        """
+        Pick the furthest known-free, non-blocked cell from the drone.
+
+        Uses:
+            state_grid == 0  → known free
+            cost_grid > 0    → not blocked by obstacle inflation / roof
+
+        Returns:
+            target_ned, or None
+        """
+
+        state_grid = self.grid_node.get_state_grid()
+        cost_grid = self.grid_node.get_pathfinding_grid()
+
+        known_free = state_grid == 0
+        walkable = cost_grid > 0.0
+
+        valid = known_free & walkable
+
+        indices = np.argwhere(valid)
+
+        if indices.shape[0] == 0:
+            self.get_logger().warn("No known free cells available for fallback target.")
+            return None
+
+        # Optional downsample for speed if there are many free cells
+        if indices.shape[0] > max_candidates:
+            selected = np.random.choice(
+                indices.shape[0],
+                max_candidates,
+                replace=False,
+            )
+            indices = indices[selected]
+
+        best_target = None
+        best_distance = -1.0
+
+        drone_ned = np.array(drone_ned, dtype=np.float32)
+
+        for ix, iy, iz in indices:
+            north, east, down = self.grid_node.grid_to_ned_position(ix, iy, iz)
+
+            target_ned = np.array([north, east, down], dtype=np.float32)
+
+            dist = self.distance_ned(drone_ned, target_ned)
+
+            if dist < min_distance:
+                continue
+
+            if dist > best_distance:
+                best_distance = dist
+                best_target = target_ned
+
+        if best_target is None:
+            self.get_logger().warn("No suitable furthest known-free fallback target found.")
+            return None
+
+        self.get_logger().warn(
+            f"Using fallback furthest known-free target: "
+            f"distance={best_distance:.2f} m, "
+            f"N={best_target[0]:.2f}, "
+            f"E={best_target[1]:.2f}, "
+            f"D={best_target[2]:.2f}"
+        )
+
+        return best_target
 
     def plan_to_frontier(self, drone_ned, frontier_ned):
         """
@@ -224,8 +303,8 @@ class FrontierPathfinder(Node):
 
         heap = self.build_frontier_priority_queue(
             drone_ned,
-            min_cluster_size=10,
-            information_gain_weight=0.05,
+            min_cluster_size=50,
+            information_gain_weight=0.00,
         )
 
         if len(heap) == 0:
@@ -248,13 +327,95 @@ class FrontierPathfinder(Node):
                 f"D={frontier_ned[2]:.2f}"
             )
 
-            path = self.plan_to_frontier(drone_ned, frontier_ned)
+            target_ned = self.offset_frontier_target(
+                drone_ned=drone_ned,
+                frontier_ned=frontier_ned,
+                upward_offset=0.25,
+                toward_drone_offset=0.25,
+            )
+
+            target_distance = self.distance_ned(drone_ned, target_ned)
+
+            if target_distance < 5.0:
+                self.get_logger().info(
+                    f"Skipping target because it is already too close: {target_distance:.2f} m"
+                )
+                continue
+
+            self.get_logger().info(
+                f"Offset target: "
+                f"N={target_ned[0]:.2f}, "
+                f"E={target_ned[1]:.2f}, "
+                f"D={target_ned[2]:.2f}"
+            )
+
+            path = self.plan_to_frontier(drone_ned, target_ned)
 
             if path is not None:
-                return path, frontier_ned
+                return path, target_ned
 
-        self.get_logger().warn("No reachable frontier found.")
+        self.get_logger().warn(
+            "No reachable frontier found. Trying furthest known-free fallback target."
+        )
+
+        fallback_target = self.get_furthest_known_free_target(
+            drone_ned=drone_ned,
+            min_distance=2.0,
+            max_candidates=1000,
+        )
+
+        if fallback_target is not None:
+            path = self.plan_to_frontier(drone_ned, fallback_target)
+
+            if path is not None:
+                self.get_logger().warn("Fallback known-free path found.")
+                return path, fallback_target
+
+        self.get_logger().warn("No reachable frontier or fallback known-free target found.")
         return None, None
+
+    def offset_frontier_target(
+        self,
+        drone_ned,
+        frontier_ned,
+        upward_offset=0.5,
+        toward_drone_offset=0.5,
+    ):
+        """
+        Offset the selected frontier target.
+
+        Input/output are MAVSDK NED:
+            [north, east, down]
+
+        Adjustments:
+            1. Move 0.5 m upward:
+                down -= 0.5
+
+            2. Move 0.5 m from the frontier toward the drone's current position.
+            This keeps the target slightly on the drone side of the frontier,
+            instead of directly on the unknown boundary.
+        """
+
+        target = np.array(frontier_ned, dtype=np.float32).copy()
+        drone = np.array(drone_ned, dtype=np.float32)
+
+        # Direction from frontier toward drone
+        direction = drone - target
+
+        # Use horizontal direction only so height is controlled separately
+        direction[2] = 0.0
+
+        norm = np.linalg.norm(direction)
+
+        if norm > 1e-6:
+            direction = direction / norm
+            target += toward_drone_offset * direction
+
+        # Move target upward.
+        # In NED, smaller down value means higher altitude.
+        target[2] -= upward_offset
+
+        return target
 
     # =========================================================
     # RViz publishing
@@ -387,6 +548,15 @@ async def planner_loop(
             drone_state.east,
             drone_state.down,
         ], dtype=np.float32)
+        
+        pathfinder.grid_node.update_drone_position_ned(
+            north=drone_state.north,
+            east=drone_state.east,
+            down=drone_state.down,
+        )
+
+        pathfinder.grid_node.mark_unknown_near_drone_as_free(radius=1.0)
+        pathfinder.grid_node.update_frontiers()
 
         path, target = pathfinder.find_best_frontier_path(
             drone_ned,

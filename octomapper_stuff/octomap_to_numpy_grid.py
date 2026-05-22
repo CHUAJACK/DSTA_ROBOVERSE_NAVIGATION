@@ -69,6 +69,9 @@ class OctomapToNumpyGrid(Node):
             Parameter("use_sim_time", Parameter.Type.BOOL, True)
         ])
 
+        self.drone_ned = None
+        self.frontier_clear_radius = 1.0
+
         self.occupied_topic = occupied_topic
         self.free_topic = free_topic
 
@@ -244,6 +247,14 @@ class OctomapToNumpyGrid(Node):
             0 <= iy < self.ny and
             0 <= iz < self.nz
         )
+
+    def update_drone_position_ned(self, north, east, down):
+        """
+        Update drone position in MAVSDK NED frame.
+
+        Used to suppress frontier cells close to the drone.
+        """
+        self.drone_ned = np.array([north, east, down], dtype=np.float32)
 
     # =========================================================
     # Marker conversion
@@ -433,6 +444,71 @@ class OctomapToNumpyGrid(Node):
         self.inflated_grid = blocked
         self.cost_grid = cost
 
+    def mark_unknown_near_drone_as_free(self, radius=1.0):
+        """
+        Mark unknown cells within a radius of the drone as known free.
+
+        This prevents the drone from repeatedly targeting frontier cells
+        that are effectively at its current position.
+
+        State grid:
+            -1 = unknown
+            0 = known free
+            1 = occupied
+
+        This does NOT override occupied or inflated cells.
+        """
+
+        if self.drone_ned is None:
+            return
+
+        drone_ix, drone_iy, drone_iz = self.ned_position_to_grid(
+            north=self.drone_ned[0],
+            east=self.drone_ned[1],
+            down=self.drone_ned[2],
+        )
+
+        radius_cells = int(np.ceil(radius / self.resolution))
+
+        x_min = max(0, drone_ix - radius_cells)
+        x_max = min(self.nx, drone_ix + radius_cells + 1)
+
+        y_min = max(0, drone_iy - radius_cells)
+        y_max = min(self.ny, drone_iy + radius_cells + 1)
+
+        z_min = max(0, drone_iz - radius_cells)
+        z_max = min(self.nz, drone_iz + radius_cells + 1)
+
+        changed_count = 0
+
+        for ix in range(x_min, x_max):
+            for iy in range(y_min, y_max):
+                for iz in range(z_min, z_max):
+                    # Do not mark occupied or inflated cells as free
+                    if self.occupied_grid[ix, iy, iz]:
+                        continue
+
+                    if self.inflated_grid[ix, iy, iz]:
+                        continue
+
+                    north, east, down = self.grid_to_ned_position(ix, iy, iz)
+
+                    cell_ned = np.array([north, east, down], dtype=np.float32)
+                    dist = np.linalg.norm(cell_ned - self.drone_ned)
+
+                    if dist <= radius:
+                        if self.state_grid[ix, iy, iz] == -1:
+                            changed_count += 1
+
+                        self.state_grid[ix, iy, iz] = 0
+                        self.known_free_grid[ix, iy, iz] = True
+
+        if changed_count > 0:
+            self.get_logger().info(
+                f"Marked {changed_count} unknown cells near drone as free.",
+                throttle_duration_sec=1.0
+            )
+
     # =========================================================
     # Frontier detection
     # =========================================================
@@ -443,7 +519,8 @@ class OctomapToNumpyGrid(Node):
 
         Frontier = known free cell adjacent to unknown cell.
 
-        Uses 6-connected neighbourhood.
+        Additional rule:
+        Remove frontier cells within self.frontier_clear_radius of the drone.
         """
 
         known_free = self.state_grid == 0
@@ -460,6 +537,42 @@ class OctomapToNumpyGrid(Node):
 
         # Do not allow frontiers inside inflated obstacle region
         frontier = frontier & (~self.inflated_grid)
+
+        # Remove frontiers within 1 m of the drone
+        if self.drone_ned is not None:
+            drone_north, drone_east, drone_down = self.drone_ned
+
+            drone_ix, drone_iy, drone_iz = self.ned_position_to_grid(
+                north=drone_north,
+                east=drone_east,
+                down=drone_down,
+            )
+
+            radius_cells = int(np.ceil(
+                self.frontier_clear_radius / self.resolution
+            ))
+
+            x_min = max(0, drone_ix - radius_cells)
+            x_max = min(self.nx, drone_ix + radius_cells + 1)
+
+            y_min = max(0, drone_iy - radius_cells)
+            y_max = min(self.ny, drone_iy + radius_cells + 1)
+
+            z_min = max(0, drone_iz - radius_cells)
+            z_max = min(self.nz, drone_iz + radius_cells + 1)
+
+            for ix in range(x_min, x_max):
+                for iy in range(y_min, y_max):
+                    for iz in range(z_min, z_max):
+                        north, east, down = self.grid_to_ned_position(ix, iy, iz)
+
+                        dist = np.linalg.norm(
+                            np.array([north, east, down], dtype=np.float32)
+                            - self.drone_ned
+                        )
+
+                        if dist <= self.frontier_clear_radius:
+                            frontier[ix, iy, iz] = False
 
         self.frontier_grid = frontier
 
@@ -756,7 +869,7 @@ async def ros_spin_task(node):
 
         # Publish RViz visualisations
         node.publish_frontiers(max_frontier_cells=5000)
-        node.publish_frontier_clusters(min_cluster_size=20)
+        node.publish_frontier_clusters(min_cluster_size=50)
 
         node.print_summary()
 

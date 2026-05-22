@@ -10,21 +10,24 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 
 from nav_msgs.msg import Path
+from visualization_msgs.msg import Marker
 
 from drone_control import Drone
 
-
-class PathFollower(Node):
+class VelocityPathFollower(Node):
     def __init__(
         self,
         drone: Drone,
         path_topic="/frontier_path",
-        waypoint_spacing=1.0,
-        max_waypoints_per_path=3,
-        pos_tolerance=0.35,
-        yaw_tolerance=10.0,
+        lookahead_distance=1.5,
+        goal_tolerance=0.7,
+        max_horizontal_speed=1.2,
+        max_vertical_speed=0.5,
+        kp_velocity=0.8,
+        control_rate_hz=10.0,
+        lock_path_until_goal=True,
     ):
-        super().__init__("path_follower")
+        super().__init__("velocity_path_follower")
 
         self.set_parameters([
             Parameter("use_sim_time", Parameter.Type.BOOL, True)
@@ -33,24 +36,75 @@ class PathFollower(Node):
         self.drone = drone
         self.path_topic = path_topic
 
-        self.waypoint_spacing = waypoint_spacing
-        self.max_waypoints_per_path = max_waypoints_per_path
-        self.pos_tolerance = pos_tolerance
-        self.yaw_tolerance = yaw_tolerance
+        self.lookahead_distance = float(lookahead_distance)
+        self.goal_tolerance = float(goal_tolerance)
+        self.max_horizontal_speed = float(max_horizontal_speed)
+        self.max_vertical_speed = float(max_vertical_speed)
+        self.kp_velocity = float(kp_velocity)
+        self.control_rate_hz = float(control_rate_hz)
 
-        self.latest_path_ned = None
-        self.latest_path_stamp = None
+        # If True:
+        #   once the drone starts following a path, it ignores normal new paths
+        #   until the final goal is reached.
+        self.lock_path_until_goal = bool(lock_path_until_goal)
+
+        self.active_path_ned = None
+        self.pending_path_ned = None
         self.path_counter = 0
-        self.following = False
+        self.active_path_id = None
+
+        self.has_sent_stop = False
 
         self.sub = self.create_subscription(
             Path,
             path_topic,
             self.path_callback,
+            10,
+        )
+
+        self.active_target_pub = self.create_publisher(
+            Marker,
+            "/active_velocity_target",
             10
         )
 
         self.get_logger().info(f"Listening for path on {path_topic}")
+        self.get_logger().info(
+            f"Velocity follower settings: "
+            f"lookahead={self.lookahead_distance:.2f} m, "
+            f"max_horizontal_speed={self.max_horizontal_speed:.2f} m/s, "
+            f"max_vertical_speed={self.max_vertical_speed:.2f} m/s"
+        )
+
+    def publish_active_target(self, target_ned):
+        marker = Marker()
+        marker.header.frame_id = "map"
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "active_velocity_target"
+        marker.id = 1
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+
+        # NED to map
+        marker.pose.position.x = float(target_ned[1])   # east
+        marker.pose.position.y = float(target_ned[0])   # north
+        marker.pose.position.z = float(-target_ned[2])  # up
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = 0.35
+        marker.scale.y = 0.35
+        marker.scale.z = 0.35
+
+        marker.color.r = 1.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+
+        self.active_target_pub.publish(marker)
+
+    # =========================================================
+    # Path callback
+    # =========================================================
 
     def path_callback(self, msg: Path):
         """
@@ -68,7 +122,7 @@ class PathFollower(Node):
         """
 
         if len(msg.poses) == 0:
-            self.get_logger().warn("Received empty path.")
+            self.get_logger().warn("Received empty /frontier_path.")
             return
 
         path_ned = []
@@ -82,14 +136,30 @@ class PathFollower(Node):
 
             path_ned.append([north, east, down])
 
-        self.latest_path_ned = np.array(path_ned, dtype=np.float32)
-        self.latest_path_stamp = self.get_clock().now()
+        path_ned = np.array(path_ned, dtype=np.float32)
+
         self.path_counter += 1
 
+        if self.active_path_ned is not None and self.lock_path_until_goal:
+            self.pending_path_ned = path_ned
+            self.get_logger().info(
+                "Received new path while following. Stored as pending path.",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        self.active_path_ned = path_ned
+        self.active_path_id = self.path_counter
+        self.has_sent_stop = False
+
         self.get_logger().info(
-            f"Received new path with {len(path_ned)} points. "
-            f"path_counter={self.path_counter}"
+            f"Accepted new path with {len(path_ned)} points. "
+            f"path_id={self.active_path_id}"
         )
+
+    # =========================================================
+    # Coordinate / geometry helpers
+    # =========================================================
 
     def distance_ned(self, a, b):
         return math.sqrt(
@@ -98,28 +168,7 @@ class PathFollower(Node):
             (a[2] - b[2]) ** 2
         )
 
-    def simplify_path_by_distance(self, path_ned):
-        """
-        Converts dense grid path into fewer waypoints.
-        """
-
-        if path_ned is None or len(path_ned) == 0:
-            return None
-
-        simplified = [path_ned[0]]
-        last = path_ned[0]
-
-        for point in path_ned[1:]:
-            if self.distance_ned(last, point) >= self.waypoint_spacing:
-                simplified.append(point)
-                last = point
-
-        if not np.allclose(simplified[-1], path_ned[-1]):
-            simplified.append(path_ned[-1])
-
-        return np.array(simplified, dtype=np.float32)
-
-    def yaw_towards_next_point(self, current_ned, target_ned):
+    def yaw_towards_point(self, current_ned, target_ned):
         """
         MAVSDK yaw convention:
             0 deg = North
@@ -139,184 +188,208 @@ class PathFollower(Node):
 
         return yaw_deg
 
-    async def get_current_ned(self):
+    def find_closest_path_index(self, current_ned, path_ned):
+        distances = np.linalg.norm(path_ned - current_ned, axis=1)
+        return int(np.argmin(distances))
+
+    def get_lookahead_target(self, current_ned, path_ned):
         """
-        Uses your Drone wrapper.
-        Expected:
-            await drone.get_position()
-            returns north, east, down
+        Finds a target point ahead along the path.
+
+        1. Find the closest path point to the drone.
+        2. Walk forward along the path until lookahead_distance is reached.
+        3. Return that point.
         """
 
+        if path_ned is None or len(path_ned) == 0:
+            return None
+
+        closest_idx = self.find_closest_path_index(current_ned, path_ned)
+
+        accumulated = 0.0
+        last = path_ned[closest_idx]
+
+        for i in range(closest_idx + 1, len(path_ned)):
+            point = path_ned[i]
+            accumulated += self.distance_ned(last, point)
+
+            if accumulated >= self.lookahead_distance:
+                return point
+
+            last = point
+
+        # If near the end, use final goal
+        return path_ned[-1]
+
+    def compute_velocity_command(self, current_ned, target_ned):
+        """
+        P-controller toward lookahead point.
+
+        Returns:
+            vn, ve, vd
+        """
+
+        error = target_ned - current_ned
+
+        vn = self.kp_velocity * float(error[0])
+        ve = self.kp_velocity * float(error[1])
+        vd = self.kp_velocity * float(error[2])
+
+        # Limit horizontal speed
+        horizontal_speed = math.sqrt(vn ** 2 + ve ** 2)
+
+        if horizontal_speed > self.max_horizontal_speed:
+            scale = self.max_horizontal_speed / horizontal_speed
+            vn *= scale
+            ve *= scale
+
+        # Limit vertical speed
+        vd = max(min(vd, self.max_vertical_speed), -self.max_vertical_speed)
+
+        return vn, ve, vd
+
+    # =========================================================
+    # Drone helpers
+    # =========================================================
+
+    async def get_current_ned(self):
         north, east, down = await self.drone.get_position()
         return np.array([north, east, down], dtype=np.float32)
-
-    async def wait_until_position_reached(
-        self,
-        target_north,
-        target_east,
-        target_down,
-        target_yaw=None,
-        hold_time=0.3,
-        timeout=10.0,
-    ):
-        start_time = time.monotonic()
-        stable_since = None
-
-        while True:
-            if time.monotonic() - start_time > timeout:
-                return False
-
-            north, east, down = await self.drone.get_position()
-
-            distance_error = math.sqrt(
-                (target_north - north) ** 2 +
-                (target_east - east) ** 2 +
-                (target_down - down) ** 2
-            )
-
-            yaw_ok = True
-
-            if target_yaw is not None:
-                yaw = await self.drone.get_yaw()
-                yaw_error = target_yaw - yaw
-
-                while yaw_error > 180:
-                    yaw_error -= 360
-                while yaw_error < -180:
-                    yaw_error += 360
-
-                yaw_ok = abs(yaw_error) < self.yaw_tolerance
-
-            pos_ok = distance_error < self.pos_tolerance
-
-            now = time.monotonic()
-
-            if pos_ok and yaw_ok:
-                if stable_since is None:
-                    stable_since = now
-
-                if now - stable_since >= hold_time:
-                    return True
-            else:
-                stable_since = None
-
-            await asyncio.sleep(0.1)
-
-    async def follow_latest_path_once(self):
+    
+    async def send_velocity(self, vn, ve, vd, yaw_deg):
         """
-        Follow only the first few waypoints of the latest path.
+        Sends velocity using your Drone wrapper.
 
-        This is intentional:
-        after a short segment, the pathfinder can publish a newer path
-        based on updated OctoMap/frontiers.
+        Drone wrapper:
+            send_velocity(vx, vy, vz, yaw_deg)
+
+        Where:
+            vx = north velocity
+            vy = east velocity
+            vz = down velocity
         """
 
-        if self.latest_path_ned is None:
-            return False
-
-        path_id = self.path_counter
-        raw_path = self.latest_path_ned.copy()
-
-        waypoints = self.simplify_path_by_distance(raw_path)
-
-        if waypoints is None or len(waypoints) < 2:
-            self.get_logger().warn("Path has too few waypoints to follow.")
-            return False
-
-        current_ned = await self.get_current_ned()
-
-        # Replace first waypoint with actual current position for yaw calculation
-        waypoints[0] = current_ned
-
-        end_index = min(len(waypoints), self.max_waypoints_per_path + 1)
-
-        self.get_logger().info(
-            f"Following path segment: {end_index - 1} waypoints "
-            f"from path_id={path_id}"
+        await self.drone.send_velocity(
+            vx=float(vn),
+            vy=float(ve),
+            vz=float(vd),
+            yaw_deg=float(yaw_deg),
         )
 
-        for i in range(1, end_index):
-            # If a newer path appears while following, stop and use the new one
-            if self.path_counter != path_id:
-                self.get_logger().info("New path received. Replanning segment.")
-                return False
+    async def stop_drone(self):
+        """
+        Sends zero velocity to stop the drone.
+        """
 
-            current = await self.get_current_ned()
-            target = waypoints[i]
+        yaw_deg = 0.0
 
-            yaw_deg = self.yaw_towards_next_point(current, target)
+        try:
+            yaw_deg = await self.drone.get_yaw()
+        except Exception:
+            pass
 
-            north = float(target[0])
-            east = float(target[1])
-            down = float(target[2])
+        await self.send_velocity(
+            vn=0.0,
+            ve=0.0,
+            vd=0.0,
+            yaw_deg=yaw_deg,
+        )
+
+    # =========================================================
+    # Main control step
+    # =========================================================
+
+    async def control_step(self):
+        if self.active_path_ned is None:
+            if not self.has_sent_stop:
+                await self.stop_drone()
+                self.has_sent_stop = True
 
             self.get_logger().info(
-                f"Sending waypoint {i}/{end_index - 1}: "
-                f"N={north:.2f}, E={east:.2f}, D={down:.2f}, Yaw={yaw_deg:.1f}"
+                "Waiting for /frontier_path...",
+                throttle_duration_sec=2.0,
+            )
+            return
+
+        current_ned = await self.get_current_ned()
+        goal_ned = self.active_path_ned[-1]
+
+        distance_to_goal = self.distance_ned(current_ned, goal_ned)
+
+        if distance_to_goal <= self.goal_tolerance:
+            self.get_logger().info(
+                f"Reached frontier goal. distance={distance_to_goal:.2f} m"
             )
 
-            # Use your Drone wrapper movement function
-            await self.drone.send_position_setpoint(
-                north=north,
-                east=east,
-                down=down,
-                yaw_deg=yaw_deg,
-            )
+            await self.stop_drone()
 
-            # If custom_position_setpoint already waits until reached,
-            # this wait is still okay but can be removed later.
-            reached = await self.wait_until_position_reached(
-                target_north=north,
-                target_east=east,
-                target_down=down,
-                target_yaw=yaw_deg,
-                hold_time=0.3,
-                timeout=10.0,
-            )
+            self.active_path_ned = None
+            self.active_path_id = None
+            self.has_sent_stop = True
 
-            if not reached:
-                self.get_logger().warn("Waypoint timeout. Waiting for new path.")
-                return False
+            # If a path was published while following, accept it now.
+            if self.pending_path_ned is not None:
+                self.active_path_ned = self.pending_path_ned
+                self.pending_path_ned = None
+                self.active_path_id = self.path_counter
+                self.has_sent_stop = False
 
-        self.get_logger().info("Completed short path segment.")
-        return True
+                self.get_logger().info("Accepted pending path after reaching goal.")
+
+            return
+
+        target_ned = self.get_lookahead_target(
+            current_ned=current_ned,
+            path_ned=self.active_path_ned,
+        )
+
+        self.publish_active_target(target_ned)
+
+        if target_ned is None:
+            self.get_logger().warn("No valid lookahead target.")
+            await self.stop_drone()
+            return
+
+        vn, ve, vd = self.compute_velocity_command(
+            current_ned=current_ned,
+            target_ned=target_ned,
+        )
+
+        yaw_deg = self.yaw_towards_point(current_ned, target_ned)
+
+        await self.send_velocity(vn, ve, vd, yaw_deg)
+
+        self.get_logger().info(
+            f"Following path | "
+            f"goal_dist={distance_to_goal:.2f} m, "
+            f"target N={target_ned[0]:.2f}, "
+            f"E={target_ned[1]:.2f}, "
+            f"D={target_ned[2]:.2f}, "
+            f"vel N={vn:.2f}, E={ve:.2f}, D={vd:.2f}, "
+            f"yaw={yaw_deg:.1f}",
+            throttle_duration_sec=0.5,
+        )
 
 
-async def ros_spin_task(node: PathFollower):
+async def ros_spin_task(node: VelocityPathFollower):
     while rclpy.ok():
         rclpy.spin_once(node, timeout_sec=0.0)
         await asyncio.sleep(0.01)
 
 
-async def follow_loop(node: PathFollower):
+async def control_loop(node: VelocityPathFollower):
+    period = 1.0 / node.control_rate_hz
+
     while rclpy.ok():
-        if node.latest_path_ned is None:
-            node.get_logger().info(
-                "Waiting for /frontier_path...",
-                throttle_duration_sec=2.0
-            )
-            await asyncio.sleep(0.5)
-            continue
-
-        if node.following:
-            await asyncio.sleep(0.1)
-            continue
-
-        node.following = True
-
         try:
-            await node.follow_latest_path_once()
+            await node.control_step()
 
         except Exception as e:
             node.get_logger().error(
-                f"Path following error: {type(e).__name__}: {e}"
+                f"Velocity follower error: {type(e).__name__}: {e}"
             )
 
-        finally:
-            node.following = False
-
-        # Small pause before following next updated path
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(period)
 
 
 async def main():
@@ -325,22 +398,38 @@ async def main():
     drone = Drone()
     await drone.connect()
 
-    node = PathFollower(
+    node = VelocityPathFollower(
         drone=drone,
         path_topic="/frontier_path",
-        waypoint_spacing=1.0,
-        max_waypoints_per_path=3,
-        pos_tolerance=0.35,
-        yaw_tolerance=10.0,
+
+        # Tune these first
+        lookahead_distance=1,
+        goal_tolerance=0.25,
+
+        # Speed tuning
+        max_horizontal_speed=5,
+        max_vertical_speed=0.5,
+        kp_velocity=1.2,
+
+        control_rate_hz=10.0,
+
+        # True means it commits to one frontier path until it reaches the goal.
+        # New paths are stored and used only after reaching the current goal.
+        lock_path_until_goal=True,
     )
 
     try:
         await asyncio.gather(
             ros_spin_task(node),
-            follow_loop(node),
+            control_loop(node),
         )
 
     finally:
+        try:
+            await node.stop_drone()
+        except Exception:
+            pass
+
         node.destroy_node()
         rclpy.shutdown()
 

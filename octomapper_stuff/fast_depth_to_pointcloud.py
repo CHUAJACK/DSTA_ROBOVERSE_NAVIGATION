@@ -28,7 +28,7 @@ class FastDepthToPointCloud(Node):
         cx=320.0,
         cy=240.0,
         stride=8,
-        min_depth=0.3,
+        min_depth=0.1,
         max_depth=10.0,
         publish_rate_hz=5.0,
     ):
