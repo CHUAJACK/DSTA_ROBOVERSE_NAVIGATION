@@ -1,4 +1,4 @@
-# Frontier Exploration Drone
+# Frontier Exploration Drone (Simulation only)
 
 Autonomous drone exploration using PX4 SITL + Gazebo + ROS 2 Humble. The drone builds a live 3D OctoMap, slices it to a 2D occupancy grid, and uses Wavefront Frontier Detection + A* to navigate unexplored space. The frontier selection is an weighted formula that balances between distance, size and angle to direction the drone is heading.
 
@@ -98,18 +98,6 @@ source venv/bin/activate
 python3 frontier_explore_drone.py 
 ```
 
-The drone will:
-1. Connect to PX4 via MAVSDK
-2. Arm and take off to 2.5 m
-3. Wait for OctoMap pipeline health check (10 frames)
-4. Do a **double 360° sweep** to seed the initial map
-5. Score and select the best frontier (distance + size + heading)
-6. Plan an A* path with wall-proximity cost gradient, densified and smoothed
-7. Follow the path, replanning only if a waypoint becomes BLOCKED or a much closer frontier appears
-8. Do a 360° yaw sweep at the frontier, waiting for OctoMap to catch up
-9. Repeat until no frontiers remain, then land
-10. Print total exploration time on completion
-
 ---
 
 ## What You See in RViz2
@@ -123,7 +111,27 @@ The drone will:
 
 ---
 
-## Tuning Parameters
+## Custom Ros2 Node Tuning Params 
+### PointCloudRangeFilter node
+### Features:
+1. Downsampling feature -> the depth image resolution can be decreased to build the map faster and publish at a higher rate
+2. FOV readjustment     -> match the depth camera fov and rgb camera fov for better exploration and overlook prevention
+3. Point Filtering      -> Filters out Depth pixels caused by the drones rotors when it pitches up to filter out ghost particles by ignoring points within a certain distance from the camera
+4. Emergency Alarm    -> Publishes true when the drone's depth image is too close to any obstacle within a threshold
+
+| Param | Description | Default value | 
+| -------- | ------------------- | -------- |
+|gz_depth| gazebo depth camera image topic | "/depth_camera"|
+|gz_camera_info|  gazebo depth camera info topic | "/camera_info"
+|null_range_min|  Filter strip start Z |  0.0
+|null_range_max|  Filter strip end Z |  1.0
+|output_topic  |  Output PointCloud topic name |"/depth_camera_bridged/points"
+|downsample    |  how many pixels to form square for new pixel  | 1
+|strip_width   |  the horizontal width for the Alarm to sound(pixels) |  20
+|danger_threshold|Distance threshold to sound alarm |   1.0
+
+
+## Frontier Exploration Tuning Parameters
 
 All parameters are at the top of `frontier_explore_drone.py`:
 
